@@ -1,0 +1,10 @@
+﻿bin/
+dist/
+*.exe
+*.test
+coverage.out
+.cache/
+.gocache/
+.idea/
+.vscode/
+.DS_Store

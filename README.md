@@ -1,0 +1,76 @@
+﻿# AIFAR Runtime
+
+AIFAR Runtime 是一个单机、类 Kubernetes 的运行时控制器。它接收镜像和期望状态，把应用调和到本机 Docker，并暴露稳定的宿主机 Service / Ingress 入口。
+
+AIFAR Runtime is a single-node Kubernetes-like runtime controller. It accepts images plus desired state, reconciles applications onto local Docker, and exposes stable host-level Service / Ingress entrypoints.
+
+## Scope / 范围
+
+- Core resources: `Deployment`, `Service`, `Ingress`.
+- Runtime input: one rendered `Runtime` resource, usually `rendered-runtime.yaml`.
+- Runtime provider: local Docker.
+- Service discovery: application-owned. Runtime does not register into Nacos, Eureka, Consul, or other registries.
+- Delete behavior: removes Runtime state, listeners, and owned containers only. It does not remove images, data directories, external services, or registry records.
+
+## Layout / 目录
+
+```text
+cmd/aifar-runtime/          CLI and local HTTP API
+internal/runtimeagent/      runtime contract, reconciler, proxy, state store
+docs/aifar-runtime-design.md resource contract design
+```
+
+## Build / 构建
+
+```powershell
+go test ./...
+go build -o bin/aifar-runtime.exe ./cmd/aifar-runtime
+```
+
+## CLI / 命令
+
+```powershell
+aifar-runtime serve --listen 127.0.0.1:18081 --state-dir /var/lib/aifar-runtime
+aifar-runtime validate -f rendered-runtime.yaml
+aifar-runtime apply -f rendered-runtime.yaml
+aifar-runtime status --namespace prod --name demo
+aifar-runtime events --namespace prod --name demo --tail 100
+aifar-runtime delete --namespace prod --name demo
+```
+
+## Minimal Runtime YAML / 最小 YAML
+
+```yaml
+apiVersion: aifar.io/v1
+kind: Runtime
+metadata:
+  name: demo
+  namespace: prod
+spec:
+  network: aifar-runtime
+  deployments:
+    - name: api
+      image: registry.local/demo-api:1.0.0
+      replicas: 2
+      ports:
+        - name: http
+          containerPort: 9000
+      env:
+        SERVICE_REGISTER_IP: 192.168.74.132
+        SERVICE_REGISTER_PORT: "19000"
+  services:
+    - name: api
+      selector:
+        app: api
+      port: 9000
+      targetPort: http
+      listenPort: 19000
+  ingress:
+    - name: public
+      provider: builtin
+      listenPort: 8080
+      routes:
+        - path: /api
+          serviceName: api
+          servicePort: 9000
+```
