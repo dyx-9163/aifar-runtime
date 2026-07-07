@@ -37,9 +37,11 @@ func NewStatus(runtime Runtime, phase string, endpoints map[string][]Endpoint, e
 			Condition{Type: "IngressReady", Status: "True", Reason: "ProxyConfigured", LastTransitionTime: now},
 		)
 	}
+	readyReplicas := readyReplicasByDeployment(runtime, endpoints)
 	for _, deployment := range runtime.Spec.Deployments {
 		status.Deployments = append(status.Deployments, DeploymentStatus{
 			Name:     deployment.Name,
+			Ready:    readyReplicas[deployment.Name],
 			Replicas: deploymentReplicas(deployment),
 			Image:    deployment.Image,
 			Revision: deployment.Revision,
@@ -63,6 +65,27 @@ func NewStatus(runtime Runtime, phase string, endpoints map[string][]Endpoint, e
 		})
 	}
 	return fixIngressStatus(status, runtime, resourcePhase)
+}
+
+func readyReplicasByDeployment(runtime Runtime, endpoints map[string][]Endpoint) map[string]int {
+	ready := map[string]int{}
+	seen := map[string]bool{}
+	for _, service := range runtime.Spec.Services {
+		matches := matchingDeployments(runtime, service.Selector)
+		for _, endpoint := range endpoints[service.Name] {
+			for _, deployment := range matches {
+				for replica := 1; replica <= deploymentReplicas(deployment); replica++ {
+					name := containerNameForDeployment(runtime, deployment, replica)
+					if endpoint.Container != name || seen[name] {
+						continue
+					}
+					ready[deployment.Name]++
+					seen[name] = true
+				}
+			}
+		}
+	}
+	return ready
 }
 
 func fixIngressStatus(status RuntimeStatus, runtime Runtime, phase string) RuntimeStatus {

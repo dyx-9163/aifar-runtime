@@ -50,6 +50,63 @@ func TestHealthzDoesNotRequireDockerReadiness(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandlerRequiresBearerTokenWhenConfigured(t *testing.T) {
+	handler := newRuntimeHandlerWithOptions(
+		runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir()}),
+		func(context.Context) error { return nil },
+		runtimeHandlerOptions{AuthToken: "secret", MetricsEnabled: true, Build: currentBuildInfo()},
+	)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status without token code = %d", recorder.Code)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("healthz should stay public, code = %d", recorder.Code)
+	}
+
+	recorder = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status with token code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRuntimeHandlerServesMetricsAndVersion(t *testing.T) {
+	handler := newRuntimeHandlerWithOptions(
+		runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir()}),
+		func(context.Context) error { return nil },
+		runtimeHandlerOptions{MetricsEnabled: true, Build: buildInfo{Version: "test", Commit: "abc", BuildDate: "now", RuntimeVersion: runtimeagent.RuntimeVersion}},
+	)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "aifar_runtime_info") {
+		t.Fatalf("metrics code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/version", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"version":"test"`) {
+		t.Fatalf("version code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAPIBaseURLAcceptsExplicitScheme(t *testing.T) {
+	if got := apiBaseURL("https://runtime.local:18443/"); got != "https://runtime.local:18443" {
+		t.Fatalf("unexpected base URL: %s", got)
+	}
+	if got := apiBaseURL("127.0.0.1:18081"); got != "http://127.0.0.1:18081" {
+		t.Fatalf("unexpected default base URL: %s", got)
+	}
+}
+
 func TestRuntimeAPIApplyStatusEventsDeleteLoop(t *testing.T) {
 	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir(), Runner: emptyDockerRunner{}})
 	handler := newRuntimeHandler(manager, manager.Ready)

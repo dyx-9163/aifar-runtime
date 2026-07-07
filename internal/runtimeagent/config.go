@@ -31,13 +31,16 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type RuntimeConfig struct {
-	API       APIConfig       `json:"api,omitempty" yaml:"api,omitempty"`
-	State     StateConfig     `json:"state,omitempty" yaml:"state,omitempty"`
-	Docker    DockerConfig    `json:"docker,omitempty" yaml:"docker,omitempty"`
-	Container ContainerConfig `json:"container,omitempty" yaml:"container,omitempty"`
-	Proxy     ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty"`
-	Reconcile ReconcileConfig `json:"reconcile,omitempty" yaml:"reconcile,omitempty"`
-	Health    HealthConfig    `json:"health,omitempty" yaml:"health,omitempty"`
+	API           APIConfig           `json:"api,omitempty" yaml:"api,omitempty"`
+	State         StateConfig         `json:"state,omitempty" yaml:"state,omitempty"`
+	Docker        DockerConfig        `json:"docker,omitempty" yaml:"docker,omitempty"`
+	Container     ContainerConfig     `json:"container,omitempty" yaml:"container,omitempty"`
+	Proxy         ProxyConfig         `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+	Reconcile     ReconcileConfig     `json:"reconcile,omitempty" yaml:"reconcile,omitempty"`
+	Health        HealthConfig        `json:"health,omitempty" yaml:"health,omitempty"`
+	Security      SecurityConfig      `json:"security,omitempty" yaml:"security,omitempty"`
+	Observability ObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty"`
+	Log           LogConfig           `json:"log,omitempty" yaml:"log,omitempty"`
 }
 
 type APIConfig struct {
@@ -77,6 +80,22 @@ type HealthConfig struct {
 	DockerTimeout Duration `json:"dockerTimeout,omitempty" yaml:"dockerTimeout,omitempty"`
 }
 
+type SecurityConfig struct {
+	BearerToken     string `json:"bearerToken,omitempty" yaml:"bearerToken,omitempty"`
+	BearerTokenFile string `json:"bearerTokenFile,omitempty" yaml:"bearerTokenFile,omitempty"`
+	TLSCertFile     string `json:"tlsCertFile,omitempty" yaml:"tlsCertFile,omitempty"`
+	TLSKeyFile      string `json:"tlsKeyFile,omitempty" yaml:"tlsKeyFile,omitempty"`
+}
+
+type ObservabilityConfig struct {
+	MetricsEnabled bool `json:"metricsEnabled,omitempty" yaml:"metricsEnabled,omitempty"`
+}
+
+type LogConfig struct {
+	Format string `json:"format,omitempty" yaml:"format,omitempty"`
+	Level  string `json:"level,omitempty" yaml:"level,omitempty"`
+}
+
 func DefaultRuntimeConfig() RuntimeConfig {
 	return RuntimeConfig{
 		API: APIConfig{
@@ -109,6 +128,13 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		Health: HealthConfig{
 			DockerTimeout: Duration{Duration: 5 * time.Second},
 		},
+		Observability: ObservabilityConfig{
+			MetricsEnabled: true,
+		},
+		Log: LogConfig{
+			Format: "json",
+			Level:  "info",
+		},
 	}
 }
 
@@ -116,6 +142,9 @@ func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
 	config := DefaultRuntimeConfig()
 	path = strings.TrimSpace(path)
 	if path == "" {
+		if err := ValidateRuntimeConfig(config); err != nil {
+			return RuntimeConfig{}, err
+		}
 		return config, nil
 	}
 	data, err := os.ReadFile(path)
@@ -126,6 +155,9 @@ func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
 		return RuntimeConfig{}, err
 	}
 	config = NormalizeRuntimeConfig(config)
+	if err := resolveRuntimeConfigSecrets(&config); err != nil {
+		return RuntimeConfig{}, err
+	}
 	if err := ValidateRuntimeConfig(config); err != nil {
 		return RuntimeConfig{}, err
 	}
@@ -155,6 +187,12 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.Proxy.ReadHeaderTimeout = defaultDuration(config.Proxy.ReadHeaderTimeout, defaults.Proxy.ReadHeaderTimeout)
 	config.Reconcile.Interval = defaultDuration(config.Reconcile.Interval, defaults.Reconcile.Interval)
 	config.Health.DockerTimeout = defaultDuration(config.Health.DockerTimeout, defaults.Health.DockerTimeout)
+	config.Security.BearerToken = strings.TrimSpace(config.Security.BearerToken)
+	config.Security.BearerTokenFile = strings.TrimSpace(config.Security.BearerTokenFile)
+	config.Security.TLSCertFile = strings.TrimSpace(config.Security.TLSCertFile)
+	config.Security.TLSKeyFile = strings.TrimSpace(config.Security.TLSKeyFile)
+	config.Log.Format = strings.ToLower(defaultString(config.Log.Format, defaults.Log.Format))
+	config.Log.Level = strings.ToLower(defaultString(config.Log.Level, defaults.Log.Level))
 	return config
 }
 
@@ -201,6 +239,37 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	if config.Health.DockerTimeout.Duration <= 0 {
 		return errorsForField("health.dockerTimeout", "must be greater than zero")
 	}
+	if (config.Security.TLSCertFile == "") != (config.Security.TLSKeyFile == "") {
+		return errorsForField("security.tlsCertFile/security.tlsKeyFile", "must be configured together")
+	}
+	switch config.Log.Format {
+	case "json", "text":
+	default:
+		return errorsForField("log.format", `must be "json" or "text"`)
+	}
+	switch config.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return errorsForField("log.level", `must be "debug", "info", "warn", or "error"`)
+	}
+	return nil
+}
+
+func resolveRuntimeConfigSecrets(config *RuntimeConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.Security.BearerToken != "" && config.Security.BearerTokenFile != "" {
+		return errorsForField("security.bearerTokenFile", "must not be set with security.bearerToken")
+	}
+	if config.Security.BearerTokenFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(config.Security.BearerTokenFile)
+	if err != nil {
+		return fmt.Errorf("read runtime config security.bearerTokenFile: %w", err)
+	}
+	config.Security.BearerToken = strings.TrimSpace(string(data))
 	return nil
 }
 

@@ -36,6 +36,7 @@ On Linux hosts with `make`:
 ```bash
 make check
 make build
+make release VERSION=0.1.0
 ```
 
 ## CLI / 命令
@@ -69,6 +70,8 @@ sudo systemctl status aifar-runtime
 ```
 
 默认服务依赖本机 Docker，并以专用用户 `aifar-runtime` 运行。运行参数集中在 `/etc/aifar-runtime/config.yaml`。该用户需要通过 `docker` supplementary group 访问 Docker socket；如果发行版的 Docker 权限策略不同，需要调整 `deploy/systemd/aifar-runtime.service`。
+
+生产环境建议配置 `security.bearerTokenFile`，必要时同时配置 `security.tlsCertFile` / `security.tlsKeyFile`。控制面提供 `/healthz`、`/readyz`、`/status`、`/version`、`/metrics` 和 Runtime API。
 
 更多配置和运维步骤见 `docs/config-reference.md` 与 `docs/operations-runbook.md`。
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,6 +22,19 @@ import (
 
 const defaultAPIAddr = runtimeagent.DefaultAPIListen
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+type buildInfo struct {
+	Version        string `json:"version"`
+	Commit         string `json:"commit"`
+	BuildDate      string `json:"buildDate"`
+	RuntimeVersion string `json:"runtimeVersion"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -34,6 +48,9 @@ func main() {
 
 func run(command string, args []string) error {
 	switch command {
+	case "version":
+		writeStdoutJSON(currentBuildInfo())
+		return nil
 	case "health":
 		cmd := flag.NewFlagSet("health", flag.ExitOnError)
 		configPath := cmd.String("config", "", "path to runtime config yaml")
@@ -64,6 +81,7 @@ func run(command string, args []string) error {
 		cmd := flag.NewFlagSet("apply", flag.ExitOnError)
 		file := cmd.String("f", "", "path to rendered-runtime.yaml")
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
 		if strings.TrimSpace(*file) == "" {
 			return errors.New("-f is required")
@@ -72,7 +90,7 @@ func run(command string, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := putRuntime(context.Background(), *addr, runtime); err != nil {
+		if err := putRuntime(context.Background(), *addr, *token, runtime); err != nil {
 			return err
 		}
 		writeStdoutJSON(map[string]any{"status": "applied", "runtime": runtime.Metadata})
@@ -82,13 +100,14 @@ func run(command string, args []string) error {
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
 		namespace := cmd.String("namespace", runtimeagent.DefaultNamespace, "runtime namespace")
 		name := cmd.String("name", "", "runtime name")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
 		var data []byte
 		var err error
 		if strings.TrimSpace(*name) == "" {
-			data, err = getRuntimeStatus(context.Background(), *addr)
+			data, err = getRuntimeStatus(context.Background(), *addr, *token)
 		} else {
-			data, err = getRuntimeResource(context.Background(), *addr, *namespace, *name, "status")
+			data, err = getRuntimeResource(context.Background(), *addr, *token, *namespace, *name, "status")
 		}
 		if err != nil {
 			return err
@@ -101,11 +120,12 @@ func run(command string, args []string) error {
 		namespace := cmd.String("namespace", runtimeagent.DefaultNamespace, "runtime namespace")
 		name := cmd.String("name", "", "runtime name")
 		tail := cmd.Int("tail", 100, "event tail count")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
 		if strings.TrimSpace(*name) == "" {
 			return errors.New("--name is required")
 		}
-		data, err := getRuntimeEvents(context.Background(), *addr, *namespace, *name, *tail)
+		data, err := getRuntimeEvents(context.Background(), *addr, *token, *namespace, *name, *tail)
 		if err != nil {
 			return err
 		}
@@ -116,11 +136,12 @@ func run(command string, args []string) error {
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
 		namespace := cmd.String("namespace", runtimeagent.DefaultNamespace, "runtime namespace")
 		name := cmd.String("name", "", "runtime name")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
 		if strings.TrimSpace(*name) == "" {
 			return errors.New("--name is required")
 		}
-		if err := deleteRuntime(context.Background(), *addr, *namespace, *name); err != nil {
+		if err := deleteRuntime(context.Background(), *addr, *token, *namespace, *name); err != nil {
 			return err
 		}
 		writeStdoutJSON(map[string]any{"status": "deleted", "namespace": *namespace, "name": *name})
@@ -150,6 +171,7 @@ func run(command string, args []string) error {
 		cmd := flag.NewFlagSet(command, flag.ExitOnError)
 		specPath := cmd.String("spec", "", "path to runtime spec json/yaml")
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
 		if strings.TrimSpace(*specPath) == "" {
 			return errors.New("--spec is required")
@@ -158,7 +180,7 @@ func run(command string, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := postLegacyReconcile(context.Background(), *addr, runtime); err != nil {
+		if err := postLegacyReconcile(context.Background(), *addr, *token, runtime); err != nil {
 			return err
 		}
 		writeStdoutJSON(map[string]any{"status": "reconciled", "runtime": runtime.Metadata})
@@ -167,8 +189,9 @@ func run(command string, args []string) error {
 		cmd := flag.NewFlagSet("remove-instance", flag.ExitOnError)
 		instance := cmd.String("instance", "default", "legacy runtime instance id")
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
 		_ = cmd.Parse(args)
-		return deleteRuntime(context.Background(), *addr, runtimeagent.DefaultNamespace, *instance)
+		return deleteRuntime(context.Background(), *addr, *token, runtimeagent.DefaultNamespace, *instance)
 	case "register-nacos", "register-nacos-proxies", "deregister-nacos", "deregister-nacos-proxies":
 		return errors.New("unsupported: AIFAR Runtime v0.1 does not register services into Nacos")
 	default:
@@ -179,12 +202,13 @@ func run(command string, args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: aifar-runtime serve [--config /etc/aifar-runtime/config.yaml] [--listen 127.0.0.1:18081] [--state-dir /var/lib/aifar-runtime]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime version")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime health [--config /etc/aifar-runtime/config.yaml]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime validate -f rendered-runtime.yaml")
-	fmt.Fprintln(os.Stderr, "       aifar-runtime apply -f rendered-runtime.yaml [--addr 127.0.0.1:18081]")
-	fmt.Fprintln(os.Stderr, "       aifar-runtime status [--namespace default --name demo] [--addr 127.0.0.1:18081]")
-	fmt.Fprintln(os.Stderr, "       aifar-runtime events --namespace default --name demo [--tail 100] [--addr 127.0.0.1:18081]")
-	fmt.Fprintln(os.Stderr, "       aifar-runtime delete --namespace default --name demo [--addr 127.0.0.1:18081]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime apply -f rendered-runtime.yaml [--addr 127.0.0.1:18081] [--token ...]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime status [--namespace default --name demo] [--addr 127.0.0.1:18081] [--token ...]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime events --namespace default --name demo [--tail 100] [--addr 127.0.0.1:18081] [--token ...]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime delete --namespace default --name demo [--addr 127.0.0.1:18081] [--token ...]")
 }
 
 func readRuntimeFile(path string) (runtimeagent.Runtime, error) {
@@ -214,21 +238,40 @@ func serve(config runtimeagent.RuntimeConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{Config: config, Log: os.Stdout})
+	logOutput := io.Writer(os.Stdout)
+	if config.Log.Format == "json" {
+		logOutput = runtimeagent.NewStructuredLogWriter(os.Stdout)
+		log.SetOutput(logOutput)
+		log.SetFlags(0)
+	} else {
+		log.SetOutput(os.Stdout)
+		log.SetFlags(log.LstdFlags)
+	}
+
+	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{Config: config, Log: logOutput})
 	if err := manager.Load(ctx); err != nil {
 		return err
 	}
 	go manager.StartRuntimeResync(ctx, config.Reconcile.Interval.Duration)
 	go manager.StartDockerEventSync(ctx, config.Docker.EventDebounce.Duration)
 	server := &http.Server{
-		Addr:              config.API.Listen,
-		Handler:           newRuntimeHandler(manager, manager.Ready),
+		Addr: config.API.Listen,
+		Handler: newRuntimeHandlerWithOptions(manager, manager.Ready, runtimeHandlerOptions{
+			AuthToken:      config.Security.BearerToken,
+			MetricsEnabled: config.Observability.MetricsEnabled,
+			Build:          currentBuildInfo(),
+		}),
 		ReadHeaderTimeout: config.API.ReadHeaderTimeout.Duration,
 	}
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("aifar-runtime listening on %s", config.API.Listen)
-		err := server.ListenAndServe()
+		var err error
+		if config.Security.TLSCertFile != "" {
+			err = server.ListenAndServeTLS(config.Security.TLSCertFile, config.Security.TLSKeyFile)
+		} else {
+			err = server.ListenAndServe()
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 			return
@@ -258,7 +301,23 @@ func serve(config runtimeagent.RuntimeConfig) error {
 	return nil
 }
 
+type runtimeHandlerOptions struct {
+	AuthToken      string
+	MetricsEnabled bool
+	Build          buildInfo
+}
+
 func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Context) error) http.Handler {
+	return newRuntimeHandlerWithOptions(manager, readyCheck, runtimeHandlerOptions{
+		MetricsEnabled: true,
+		Build:          currentBuildInfo(),
+	})
+}
+
+func newRuntimeHandlerWithOptions(manager *runtimeagent.Manager, readyCheck func(context.Context) error, options runtimeHandlerOptions) http.Handler {
+	if options.Build.Version == "" {
+		options.Build = currentBuildInfo()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -294,8 +353,26 @@ func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Co
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, manager.Status())
+		status := manager.Status()
+		status["build"] = options.Build
+		writeJSON(w, http.StatusOK, status)
 	})
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, options.Build)
+	})
+	if options.MetricsEnabled {
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			writeMetrics(w, manager, options.Build)
+		})
+	}
 	mux.HandleFunc("/apis/aifar.io/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		handleRuntimeAPI(manager, w, r)
 	})
@@ -331,7 +408,7 @@ func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Co
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	})
-	return mux
+	return withAPISecurity(mux, options.AuthToken)
 }
 
 func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *http.Request) {
@@ -444,43 +521,51 @@ func requirePathMatchesRuntime(namespace, name string, runtime runtimeagent.Runt
 	return nil
 }
 
-func putRuntime(ctx context.Context, addr string, runtime runtimeagent.Runtime) error {
-	return doJSON(ctx, http.MethodPut, runtimeResourceURL(addr, runtime.Metadata.Namespace, runtime.Metadata.Name, ""), runtime, nil)
+func putRuntime(ctx context.Context, addr, token string, runtime runtimeagent.Runtime) error {
+	return doJSON(ctx, http.MethodPut, runtimeResourceURL(addr, runtime.Metadata.Namespace, runtime.Metadata.Name, ""), token, runtime, nil)
 }
 
-func postLegacyReconcile(ctx context.Context, addr string, runtime runtimeagent.Runtime) error {
-	return doJSON(ctx, http.MethodPost, "http://"+addr+"/runtime/reconcile", runtime, nil)
+func postLegacyReconcile(ctx context.Context, addr, token string, runtime runtimeagent.Runtime) error {
+	return doJSON(ctx, http.MethodPost, apiBaseURL(addr)+"/runtime/reconcile", token, runtime, nil)
 }
 
-func deleteRuntime(ctx context.Context, addr, namespace, name string) error {
-	return doJSON(ctx, http.MethodDelete, runtimeResourceURL(addr, namespace, name, ""), nil, nil)
+func deleteRuntime(ctx context.Context, addr, token, namespace, name string) error {
+	return doJSON(ctx, http.MethodDelete, runtimeResourceURL(addr, namespace, name, ""), token, nil, nil)
 }
 
-func getRuntimeStatus(ctx context.Context, addr string) ([]byte, error) {
-	return getURL(ctx, "http://"+addr+"/status")
+func getRuntimeStatus(ctx context.Context, addr, token string) ([]byte, error) {
+	return getURL(ctx, apiBaseURL(addr)+"/status", token)
 }
 
-func getRuntimeResource(ctx context.Context, addr, namespace, name, subresource string) ([]byte, error) {
-	return getURL(ctx, runtimeResourceURL(addr, namespace, name, subresource))
+func getRuntimeResource(ctx context.Context, addr, token, namespace, name, subresource string) ([]byte, error) {
+	return getURL(ctx, runtimeResourceURL(addr, namespace, name, subresource), token)
 }
 
-func getRuntimeEvents(ctx context.Context, addr, namespace, name string, tail int) ([]byte, error) {
+func getRuntimeEvents(ctx context.Context, addr, token, namespace, name string, tail int) ([]byte, error) {
 	url := runtimeResourceURL(addr, namespace, name, "events")
 	if tail > 0 {
 		url += "?tail=" + strconv.Itoa(tail)
 	}
-	return getURL(ctx, url)
+	return getURL(ctx, url, token)
 }
 
 func runtimeResourceURL(addr, namespace, name, subresource string) string {
-	path := "http://" + addr + "/apis/aifar.io/v1/namespaces/" + namespace + "/runtimes/" + name
+	path := apiBaseURL(addr) + "/apis/aifar.io/v1/namespaces/" + namespace + "/runtimes/" + name
 	if strings.TrimSpace(subresource) != "" {
 		path += "/" + subresource
 	}
 	return path
 }
 
-func doJSON(ctx context.Context, method, url string, in any, out any) error {
+func apiBaseURL(addr string) string {
+	addr = strings.TrimRight(strings.TrimSpace(addr), "/")
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return addr
+	}
+	return "http://" + addr
+}
+
+func doJSON(ctx context.Context, method, url, token string, in any, out any) error {
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -496,6 +581,7 @@ func doJSON(ctx context.Context, method, url string, in any, out any) error {
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setBearerToken(req, token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("aifar-runtime service is not reachable on %s: %w", url, err)
@@ -511,11 +597,12 @@ func doJSON(ctx context.Context, method, url string, in any, out any) error {
 	return nil
 }
 
-func getURL(ctx context.Context, url string) ([]byte, error) {
+func getURL(ctx context.Context, url, token string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
+	setBearerToken(req, token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("aifar-runtime service is not reachable on %s: %w", url, err)
@@ -526,6 +613,86 @@ func getURL(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("aifar-runtime request failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
 	return data, nil
+}
+
+func setBearerToken(req *http.Request, token string) {
+	token = strings.TrimSpace(token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func defaultAPIToken() string {
+	return strings.TrimSpace(os.Getenv("AIFAR_RUNTIME_TOKEN"))
+}
+
+func currentBuildInfo() buildInfo {
+	return buildInfo{
+		Version:        strings.TrimSpace(version),
+		Commit:         strings.TrimSpace(commit),
+		BuildDate:      strings.TrimSpace(buildDate),
+		RuntimeVersion: runtimeagent.RuntimeVersion,
+	}
+}
+
+func withAPISecurity(next http.Handler, token string) http.Handler {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicProbePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		want := "Bearer " + token
+		got := strings.TrimSpace(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="aifar-runtime"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isPublicProbePath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
+func writeMetrics(w http.ResponseWriter, manager *runtimeagent.Manager, build buildInfo) {
+	metrics := manager.Metrics()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP aifar_runtime_info Build and runtime contract information.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_info gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_info{version=\"%s\",commit=\"%s\",build_date=\"%s\",runtime_version=\"%s\"} 1\n",
+		promLabelValue(build.Version),
+		promLabelValue(build.Commit),
+		promLabelValue(build.BuildDate),
+		promLabelValue(metrics.RuntimeVersion),
+	)
+	fmt.Fprintf(w, "# HELP aifar_runtime_runtimes Number of rendered Runtime resources loaded.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_runtimes gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_runtimes %d\n", metrics.RuntimeCount)
+	fmt.Fprintf(w, "# HELP aifar_runtime_listeners Number of active Service and Ingress listeners.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_listeners gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_listeners %d\n", metrics.ListenerCount)
+	fmt.Fprintf(w, "# HELP aifar_runtime_desired_replicas Desired managed container replicas.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_desired_replicas gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_desired_replicas %d\n", metrics.DesiredReplicas)
+	fmt.Fprintf(w, "# HELP aifar_runtime_ready_replicas Ready managed container replicas.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_ready_replicas gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_ready_replicas %d\n", metrics.ReadyReplicas)
+	fmt.Fprintf(w, "# HELP aifar_runtime_failed_runtimes Number of Runtime resources in Failed phase.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_failed_runtimes gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_failed_runtimes %d\n", metrics.FailedRuntimeCount)
+	fmt.Fprintf(w, "# HELP aifar_runtime_endpoints Number of cached upstream endpoints.\n")
+	fmt.Fprintf(w, "# TYPE aifar_runtime_endpoints gauge\n")
+	fmt.Fprintf(w, "aifar_runtime_endpoints %d\n", metrics.EndpointCount)
+}
+
+func promLabelValue(value string) string {
+	return strings.NewReplacer(`\`, `\\`, "\n", `\n`, `"`, `\"`).Replace(value)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

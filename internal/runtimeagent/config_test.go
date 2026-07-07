@@ -18,6 +18,8 @@ docker:
   command: podman
 container:
   readyTimeout: 10s
+log:
+  format: text
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +39,9 @@ container:
 	}
 	if config.API.ShutdownTimeout.Duration != 15*time.Second {
 		t.Fatalf("unexpected shutdown timeout: %s", config.API.ShutdownTimeout.Duration)
+	}
+	if config.Log.Format != "text" {
+		t.Fatalf("unexpected log format: %s", config.Log.Format)
 	}
 	if config.State.Dir != DefaultStateDir {
 		t.Fatalf("expected default state dir, got %s", config.State.Dir)
@@ -73,5 +78,35 @@ func TestValidateRuntimeConfigRejectsInvalidHealthTemplate(t *testing.T) {
 	err := ValidateRuntimeConfig(config)
 	if err == nil || !strings.Contains(err.Error(), "httpHealthCheckTemplate") {
 		t.Fatalf("expected health check template validation error, got %v", err)
+	}
+}
+
+func TestLoadRuntimeConfigReadsBearerTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("security:\n  bearerTokenFile: "+tokenPath+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := LoadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Security.BearerToken != "secret-token" {
+		t.Fatalf("unexpected bearer token: %q", config.Security.BearerToken)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsPartialTLSConfig(t *testing.T) {
+	config := DefaultRuntimeConfig()
+	config.Security.TLSCertFile = "/etc/aifar-runtime/tls.crt"
+
+	err := ValidateRuntimeConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "tlsCertFile") {
+		t.Fatalf("expected partial TLS validation error, got %v", err)
 	}
 }

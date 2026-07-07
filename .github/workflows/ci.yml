@@ -37,3 +37,6 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Build
+        run: go build -buildvcs=false -trimpath -o bin/aifar-runtime ./cmd/aifar-runtime

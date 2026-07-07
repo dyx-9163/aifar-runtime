@@ -23,6 +23,26 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `proxy.readHeaderTimeout` | `10s` | Header read timeout for Service and Ingress proxy listeners. |
 | `reconcile.interval` | `30s` | Periodic full reconciliation interval. |
 | `health.dockerTimeout` | `5s` | Docker readiness check timeout. |
+| `security.bearerToken` | empty | Optional Runtime API bearer token. Prefer `bearerTokenFile` in production. |
+| `security.bearerTokenFile` | empty | File containing the Runtime API bearer token. |
+| `security.tlsCertFile` | empty | Optional TLS certificate file for the Runtime API. Must be set with `tlsKeyFile`. |
+| `security.tlsKeyFile` | empty | Optional TLS key file for the Runtime API. Must be set with `tlsCertFile`. |
+| `observability.metricsEnabled` | `true` | Enables the Prometheus-compatible `/metrics` endpoint. |
+| `log.format` | `json` | Process log format. Supported values: `json`, `text`. |
+| `log.level` | `info` | Reserved log level setting. Supported values: `debug`, `info`, `warn`, `error`. |
+
+## Control Plane Endpoints
+
+| Path | Purpose |
+| --- | --- |
+| `/healthz` | Liveness probe. Does not require Docker readiness or bearer auth. |
+| `/readyz` | Readiness probe. Does not require bearer auth. |
+| `/status` | Runtime API status, loaded Runtime resources, listeners, and build information. |
+| `/version` | Binary and Runtime contract version information. |
+| `/metrics` | Prometheus-compatible runtime metrics when enabled. |
+| `/apis/aifar.io/v1/namespaces/{namespace}/runtimes/{name}` | Rendered Runtime resource API. |
+
+When `security.bearerToken` or `security.bearerTokenFile` is configured, all endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
 
 ## Change Rule
 

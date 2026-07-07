@@ -27,3 +27,15 @@ reconcile:
 
 health:
   dockerTimeout: 5s
+
+security:
+  bearerTokenFile: ""
+  tlsCertFile: ""
+  tlsKeyFile: ""
+
+observability:
+  metricsEnabled: true
+
+log:
+  format: json
+  level: info

@@ -18,13 +18,22 @@ sudo systemctl enable --now aifar-runtime
 
 The service runs as `aifar-runtime` and needs access to Docker through the `docker` supplementary group. If the host uses a different Docker socket policy, adjust `deploy/systemd/aifar-runtime.service`.
 
+For private deployments, put the Runtime API token in a root-owned file and point `security.bearerTokenFile` at it:
+
+```bash
+sudo install -m 0750 -o root -g aifar-runtime -d /etc/aifar-runtime/secrets
+sudo sh -c 'umask 077 && printf "%s\n" "<replace-with-random-token>" > /etc/aifar-runtime/secrets/api-token'
+sudo chgrp aifar-runtime /etc/aifar-runtime/secrets/api-token
+```
+
 ## Daily Checks
 
 ```bash
 systemctl status aifar-runtime
 journalctl -u aifar-runtime -n 200 --no-pager
 aifar-runtime health --config /etc/aifar-runtime/config.yaml
-aifar-runtime status --addr 127.0.0.1:18081
+aifar-runtime status --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runtime/secrets/api-token)"
+curl -fsS -H "Authorization: Bearer $(sudo cat /etc/aifar-runtime/secrets/api-token)" http://127.0.0.1:18081/metrics
 ```
 
 ## Upgrade
@@ -54,3 +63,12 @@ sudo systemctl restart aifar-runtime
 | Service or Ingress port is unavailable | Check whether another process owns the listen port with `ss -ltnp`. |
 | Runtime status is `Failed` | Inspect `aifar-runtime events --namespace <ns> --name <name>` and container logs. |
 | State looks stale | Confirm `state.dir` ownership and restart the service to trigger load plus resync. |
+
+## Release Package
+
+```bash
+make release VERSION=0.1.0
+ls dist/aifar-runtime-0.1.0-linux-amd64.tar.gz
+```
+
+The release package contains the Linux binary, systemd deployment files, README, project skill guide, and docs.

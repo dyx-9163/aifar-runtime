@@ -5,6 +5,12 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 
 # AIFAR Runtime
 
+## Product Direction
+
+- Build AIFAR Runtime as a private-deployment, single-node Kubernetes replacement for small and edge environments.
+- Keep the operator experience close to Kubernetes where it helps: rendered desired-state resources, reconciliation, stable service/ingress entrypoints, status, events, probes, metrics, and systemd-based lifecycle.
+- Prefer production-operable defaults over demos. Every new runtime knob should flow through `internal/runtimeagent/config.go`, `deploy/systemd/aifar-runtime.yaml`, and `docs/config-reference.md`.
+
 ## Project Shape
 
 - Keep the CLI in `cmd/aifar-runtime` thin. Put runtime behavior, validation, state, reconciliation, proxy routing, and Docker command construction in `internal/runtimeagent`.
@@ -19,6 +25,14 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Keep delete behavior narrow: remove runtime state, listeners, and owned containers only; do not delete images, data directories, external services, or registry records.
 - Use `RuntimeProvider`-style seams through `CommandRunner` or fakes for tests. Do not call real Docker or real registries from tests.
 - Keep HTTP handlers and CLI commands as adapters around `runtimeagent` behavior.
+- Preserve optional API security and observability as first-class control-plane features for private deployments.
+
+## GitHub Publishing
+
+- After code or documentation changes are complete and validation passes, commit and push the intended project changes to `origin` by default.
+- Use the current branch unless the user asks for a PR branch. Direct push to `main` is acceptable for this private project when GitHub allows it.
+- Do not stage unrelated user changes silently. If the worktree is mixed or ownership is unclear, ask before committing.
+- If GitHub authentication, network access, or branch protection blocks the push, report the blocker clearly and keep the local commit intact.
 
 ## Testing
 
