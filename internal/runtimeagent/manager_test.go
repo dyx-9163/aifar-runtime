@@ -135,8 +135,12 @@ type fakeDockerRunner struct {
 }
 
 type fakeContainer struct {
-	labels map[string]string
-	ip     string
+	labels   map[string]string
+	ip       string
+	running  bool
+	status   string
+	health   string
+	exitCode int
 }
 
 func newFakeDockerRunner() *fakeDockerRunner {
@@ -207,14 +211,16 @@ func (r *fakeDockerRunner) inspect(args []string) (CommandResult, error) {
 		return CommandResult{Stdout: container.labels["aifar.runtime/spec-hash"] + "\n"}, nil
 	case strings.Contains(format, "aifar.spec-hash"):
 		return CommandResult{Stdout: container.labels["aifar.spec-hash"] + "\n"}, nil
+	case strings.Contains(format, ".State.Status"):
+		return CommandResult{Stdout: fakeContainerStateOutput(container)}, nil
 	case strings.Contains(format, "NetworkSettings"):
 		ip := container.ip
 		if ip == "" {
 			ip = "172.20.0.10"
 		}
-		return CommandResult{Stdout: "true|healthy|" + ip + "\n"}, nil
+		return CommandResult{Stdout: fakeBool(container.running) + "|" + container.health + "|" + ip + "\n"}, nil
 	case strings.Contains(format, ".State.Running"):
-		return CommandResult{Stdout: "true|healthy\n"}, nil
+		return CommandResult{Stdout: fakeBool(container.running) + "|" + container.health + "\n"}, nil
 	default:
 		return CommandResult{Stdout: "ok\n"}, nil
 	}
@@ -239,7 +245,13 @@ func (r *fakeDockerRunner) run(args []string) CommandResult {
 		}
 	}
 	if name != "" {
-		r.containers[name] = fakeContainer{labels: labels, ip: "172.20.0." + strconv.Itoa(10+len(r.containers))}
+		r.containers[name] = fakeContainer{
+			labels:  labels,
+			ip:      "172.20.0." + strconv.Itoa(10+len(r.containers)),
+			running: true,
+			status:  "running",
+			health:  "healthy",
+		}
 	}
 	return CommandResult{Stdout: name + "\n"}
 }
@@ -250,6 +262,9 @@ func (r *fakeDockerRunner) ps(args []string) CommandResult {
 	lines := []string{}
 	for name, container := range r.containers {
 		if !labelsInclude(container.labels, filters) {
+			continue
+		}
+		if !dockerPSIncludesStopped(args) && !container.running {
 			continue
 		}
 		if strings.Contains(format, `aifar.runtime/replica`) {
@@ -300,7 +315,18 @@ func (r *fakeDockerRunner) addContainer(name string, labels map[string]string) {
 	for key, value := range labels {
 		copied[key] = value
 	}
-	r.containers[name] = fakeContainer{labels: copied, ip: "172.20.0.99"}
+	r.containers[name] = fakeContainer{labels: copied, ip: "172.20.0.99", running: true, status: "running", health: "healthy"}
+}
+
+func (r *fakeDockerRunner) setContainerState(name string, running bool, status string, exitCode int, health string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	container := r.containers[name]
+	container.running = running
+	container.status = status
+	container.exitCode = exitCode
+	container.health = health
+	r.containers[name] = container
 }
 
 func (r *fakeDockerRunner) hasContainer(name string) bool {
@@ -348,6 +374,26 @@ func dockerFormat(args []string) string {
 	return ""
 }
 
+func dockerPSIncludesStopped(args []string) bool {
+	for _, arg := range args {
+		if arg == "-a" || arg == "--all" {
+			return true
+		}
+	}
+	return false
+}
+
+func fakeContainerStateOutput(container fakeContainer) string {
+	return fakeBool(container.running) + "|" + container.status + "|" + strconv.Itoa(container.exitCode) + "|" + container.health + "\n"
+}
+
+func fakeBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
 func labelsInclude(labels map[string]string, filters map[string]string) bool {
 	for key, value := range filters {
 		if labels[key] != value {
@@ -385,6 +431,8 @@ func (r failingDockerRunner) Run(ctx context.Context, name string, args ...strin
 	switch {
 	case strings.Contains(call, "docker inspect -f {{.Id}}"):
 		return CommandResult{}, errors.New("not found")
+	case strings.Contains(call, ".State.Status"):
+		return CommandResult{Stdout: "true|running|0|healthy\n"}, nil
 	case strings.Contains(call, "docker inspect -f {{.State.Running}}"):
 		return CommandResult{Stdout: "true|healthy\n"}, nil
 	case strings.Contains(call, "docker ps --filter") || strings.Contains(call, "docker ps -a"):

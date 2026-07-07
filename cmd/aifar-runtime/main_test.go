@@ -221,7 +221,7 @@ spec:
 	}
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/apis/aifar.io/v1/namespaces/prod/runtimes/demo/status", nil))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"phase":"Ready"`) {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"phase":"Running"`) {
 		t.Fatalf("status code = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()

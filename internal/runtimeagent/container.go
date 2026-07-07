@@ -35,9 +35,11 @@ func (m *Manager) containerNeedsRecreate(ctx context.Context, name string, deplo
 }
 
 func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment DeploymentSpec, replica int, name string) error {
+	m.updateRuntimeStatus(runtime, RuntimePhasePulling, nil, nil)
 	if err := m.pullImageWithSecrets(ctx, runtime, deployment); err != nil {
 		return err
 	}
+	m.updateRuntimeStatus(runtime, RuntimePhaseStarting, nil, nil)
 	key := KeyForRuntime(runtime)
 	args := []string{"run", "-d", "--name", name, "--restart", m.config.Docker.RestartPolicy}
 	args = append(args,

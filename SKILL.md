@@ -28,6 +28,9 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Preserve optional API security and observability as first-class control-plane features for private deployments.
 - Keep `state.backend` abstracted. `file` is the only implemented backend today; `etcd` is reserved for the future clustered control plane and must not silently fall back to local file state.
 - Treat Runtime `secrets` as rendered private-deployment material. Do not log registry passwords or secret values except where Docker requires env injection.
+- Keep Runtime phases and conditions useful for operators. Prefer explicit `Pending`, `Pulling`, `Starting`, `Running`, `Degraded`, `Updating`, `Failed`, and `Terminating` states over vague success/failure strings.
+- Keep self-healing bounded and observable. Automatic restarts must honor configured limits/backoff and write status/events.
+- Keep the single-node `node` model compatible with future etcd scheduling: validate `nodeName` and `nodeSelector`, but do not introduce distributed behavior without an explicit state backend implementation.
 
 ## GitHub Publishing
 

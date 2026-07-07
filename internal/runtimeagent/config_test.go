@@ -16,8 +16,19 @@ api:
   shutdownTimeout: 15s
 docker:
   command: podman
+node:
+  name: edge-a
+  labels:
+    zone: lab
+  capacity:
+    cpus: "2"
+    memory: 2Gi
 container:
   readyTimeout: 10s
+selfHeal:
+  enabled: false
+  maxRestarts: 5
+  backoff: 2s
 log:
   format: text
 `), 0o644); err != nil {
@@ -36,6 +47,12 @@ log:
 	}
 	if config.Container.ReadyTimeout.Duration != 10*time.Second {
 		t.Fatalf("unexpected ready timeout: %s", config.Container.ReadyTimeout.Duration)
+	}
+	if config.Node.Name != "edge-a" || config.Node.Labels["zone"] != "lab" || config.Node.Capacity.CPUs != "2" {
+		t.Fatalf("unexpected node config: %#v", config.Node)
+	}
+	if *config.SelfHeal.Enabled || config.SelfHeal.MaxRestarts != 5 || config.SelfHeal.Backoff.Duration != 2*time.Second {
+		t.Fatalf("unexpected self-heal config: %#v", config.SelfHeal)
 	}
 	if config.API.ShutdownTimeout.Duration != 15*time.Second {
 		t.Fatalf("unexpected shutdown timeout: %s", config.API.ShutdownTimeout.Duration)
@@ -78,6 +95,26 @@ func TestValidateRuntimeConfigRejectsInvalidHealthTemplate(t *testing.T) {
 	err := ValidateRuntimeConfig(config)
 	if err == nil || !strings.Contains(err.Error(), "httpHealthCheckTemplate") {
 		t.Fatalf("expected health check template validation error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsInvalidNodeConfig(t *testing.T) {
+	config := DefaultRuntimeConfig()
+	config.Node.Name = "Bad_Node"
+
+	err := ValidateRuntimeConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "node.name") {
+		t.Fatalf("expected node.name validation error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsInvalidSelfHealConfig(t *testing.T) {
+	config := DefaultRuntimeConfig()
+	config.SelfHeal.MaxRestarts = 0
+
+	err := ValidateRuntimeConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "selfHeal.maxRestarts") {
+		t.Fatalf("expected selfHeal.maxRestarts validation error, got %v", err)
 	}
 }
 

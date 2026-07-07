@@ -1,13 +1,15 @@
 package runtimeagent
 
 type RuntimeMetrics struct {
-	RuntimeVersion     string
-	RuntimeCount       int
-	ListenerCount      int
-	DesiredReplicas    int
-	ReadyReplicas      int
-	FailedRuntimeCount int
-	EndpointCount      int
+	RuntimeVersion       string
+	RuntimeCount         int
+	ListenerCount        int
+	DesiredReplicas      int
+	ReadyReplicas        int
+	FailedRuntimeCount   int
+	DegradedRuntimeCount int
+	ContainerRestarts    int
+	EndpointCount        int
 }
 
 func (m *Manager) Metrics() RuntimeMetrics {
@@ -23,11 +25,15 @@ func (m *Manager) Metrics() RuntimeMetrics {
 			metrics.DesiredReplicas += deploymentReplicas(deployment)
 		}
 		status := m.statuses[key]
-		if status.Phase == "Failed" {
+		if status.Phase == RuntimePhaseFailed {
 			metrics.FailedRuntimeCount++
+		}
+		if status.Phase == RuntimePhaseDegraded {
+			metrics.DegradedRuntimeCount++
 		}
 		for _, deployment := range status.Deployments {
 			metrics.ReadyReplicas += deployment.Ready
+			metrics.ContainerRestarts += deployment.Restarts
 		}
 	}
 	for _, endpoints := range m.endpoints {

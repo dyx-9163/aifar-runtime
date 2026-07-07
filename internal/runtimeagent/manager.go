@@ -52,6 +52,7 @@ type Manager struct {
 	servers      map[int]*http.Server
 	next         map[string]uint64
 	endpoints    map[string][]Endpoint
+	restarts     map[string]restartRecord
 }
 
 func NewManager(options ManagerOptions) *Manager {
@@ -85,6 +86,7 @@ func NewManager(options ManagerOptions) *Manager {
 		servers:      map[int]*http.Server{},
 		next:         map[string]uint64{},
 		endpoints:    map[string][]Endpoint{},
+		restarts:     map[string]restartRecord{},
 	}
 }
 
@@ -117,11 +119,21 @@ func (m *Manager) Apply(ctx context.Context, runtime Runtime) error {
 		m.appendEvent(key.Namespace, key.Name, "Warning", "Rejected", err.Error())
 		return err
 	}
+	if err := m.validateRuntimeNode(runtime); err != nil {
+		m.appendEvent(key.Namespace, key.Name, "Warning", "Rejected", err.Error())
+		return err
+	}
 	m.appendEvent(key.Namespace, key.Name, "Normal", "ApplyStarted", "Runtime reconciliation started")
+	phase := RuntimePhasePending
+	if m.runtimeExists(key) {
+		phase = RuntimePhaseUpdating
+	}
+	m.updateRuntimeStatus(runtime, phase, nil, nil)
 	if err := m.ensureNetwork(ctx, runtime.Spec.Network); err != nil {
 		m.recordFailedStatus(runtime, err)
 		return err
 	}
+	m.updateRuntimeStatus(runtime, RuntimePhaseStarting, nil, nil)
 	if err := m.reconcileDeployments(ctx, runtime); err != nil {
 		m.recordFailedStatus(runtime, err)
 		return err
@@ -144,7 +156,7 @@ func (m *Manager) Apply(ctx context.Context, runtime Runtime) error {
 	for _, port := range portsToStop {
 		m.stopPort(ctx, port)
 	}
-	status := NewStatus(runtime, "Ready", refreshed, nil)
+	status := NewStatusWithOptions(runtime, RuntimePhaseRunning, refreshed, nil, m.statusOptions(runtime))
 	m.mu.Lock()
 	m.statuses[key.String()] = status
 	m.mu.Unlock()
@@ -177,8 +189,20 @@ func (m *Manager) Remove(ctx context.Context, namespace, name string) error {
 	m.appendEvent(key.Namespace, key.Name, "Normal", "DeleteStarted", "Runtime deletion started")
 	var runtime Runtime
 	var hasRuntime bool
-	m.mu.Lock()
+	m.mu.RLock()
 	runtime, hasRuntime = m.specs[key.String()]
+	m.mu.RUnlock()
+	if !hasRuntime {
+		loaded, err := m.store.ReadRuntime(key.Namespace, key.Name)
+		if err == nil {
+			runtime = loaded
+			hasRuntime = true
+		}
+	}
+	if hasRuntime {
+		m.updateRuntimeStatus(runtime, RuntimePhaseTerminating, nil, nil)
+	}
+	m.mu.Lock()
 	delete(m.specs, key.String())
 	delete(m.statuses, key.String())
 	for endpointKey := range m.endpoints {
@@ -190,13 +214,6 @@ func (m *Manager) Remove(ctx context.Context, namespace, name string) error {
 	m.mu.Unlock()
 	for _, port := range portsToStop {
 		m.stopPort(ctx, port)
-	}
-	if !hasRuntime {
-		loaded, err := m.store.ReadRuntime(key.Namespace, key.Name)
-		if err == nil {
-			runtime = loaded
-			hasRuntime = true
-		}
 	}
 	if hasRuntime {
 		if err := m.removeOwnedContainers(ctx, runtime); err != nil {
@@ -237,6 +254,7 @@ func (m *Manager) Status() map[string]any {
 		"status":    "running",
 		"version":   RuntimeVersion,
 		"stateDir":  m.store.Root(),
+		"node":      m.nodeStatus(),
 		"listeners": listeners,
 		"runtimes":  instances,
 		"features": []string{
@@ -248,6 +266,9 @@ func (m *Manager) Status() map[string]any {
 			"json-state-store",
 			"events",
 			"docker-owner-labels",
+			"runtime-status-machine",
+			"self-healing",
+			"single-node-model",
 			"legacy-spec-read",
 		},
 	}
@@ -326,9 +347,29 @@ func (m *Manager) nextGeneration(key RuntimeKey) int64 {
 	return 1
 }
 
+func (m *Manager) runtimeExists(key RuntimeKey) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.specs[key.String()]
+	return ok
+}
+
+func (m *Manager) updateRuntimeStatus(runtime Runtime, phase string, endpoints map[string][]Endpoint, err error) RuntimeStatus {
+	key := KeyForRuntime(runtime)
+	status := NewStatusWithOptions(runtime, phase, endpoints, err, m.statusOptions(runtime))
+	m.mu.Lock()
+	m.specs[key.String()] = runtime
+	m.statuses[key.String()] = status
+	m.mu.Unlock()
+	if saveErr := m.store.SaveStatus(runtime, status); saveErr != nil {
+		logf(m.log, "AIFAR runtime status write failed namespace=%s name=%s phase=%s: %v\n", key.Namespace, key.Name, status.Phase, saveErr)
+	}
+	return status
+}
+
 func (m *Manager) recordFailedStatus(runtime Runtime, err error) {
 	key := KeyForRuntime(runtime)
-	status := NewStatus(runtime, "Failed", nil, err)
+	status := NewStatusWithOptions(runtime, RuntimePhaseFailed, nil, err, m.statusOptions(runtime))
 	m.mu.Lock()
 	m.specs[key.String()] = runtime
 	m.statuses[key.String()] = status

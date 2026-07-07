@@ -132,6 +132,8 @@ spec:
 | `kind` | no | default `Runtime` |
 | `metadata.name` | yes | lowercase letters, digits, `-` |
 | `metadata.namespace` | no | default `default` |
+| `spec.nodeName` | no | optional single-node assignment; must match local `node.name` when set |
+| `spec.nodeSelector` | no | optional label selector against local `node.labels`; reserved for future scheduler |
 | `spec.network` | no | default `aifar-runtime` |
 | `spec.deployments` | yes | workload list |
 | `spec.services` | yes | stable service list |
@@ -205,7 +207,7 @@ Runtime must separate `spec` and `status`.
 `status` includes at least:
 
 - `observedGeneration`
-- `phase`: `Pending`、`Reconciling`、`Ready`、`Degraded`、`Failed`
+- `phase`: `Pending`, `Pulling`, `Starting`, `Running`, `Degraded`, `Updating`, `Failed`, `Terminating`
 - `conditions`
 - `deployments`
 - `services`
@@ -216,7 +218,9 @@ Runtime must separate `spec` and `status`.
 Core conditions:
 
 - `SpecAccepted`
-- `DeploymentsReady`
+- `NodeAssigned`
+- `ImagePulled`
+- `ContainerReady`
 - `ServicesReady`
 - `IngressReady`
 

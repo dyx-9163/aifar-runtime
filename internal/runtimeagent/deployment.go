@@ -57,6 +57,24 @@ func (m *Manager) ensureDeployment(ctx context.Context, runtime Runtime, deploym
 				exists = false
 			}
 		}
+		if exists {
+			state, err := m.containerRuntimeState(ctx, name)
+			if err != nil {
+				return err
+			}
+			if state.Ready() {
+				m.markRestartHealthy(name)
+			}
+			if state.NeedsRestart() {
+				restarted, err := m.healContainer(ctx, runtime, deployment, replica, name, state)
+				if err != nil {
+					return err
+				}
+				if restarted {
+					continue
+				}
+			}
+		}
 		if !exists {
 			if err := m.runContainer(ctx, runtime, deployment, replica, name); err != nil {
 				return err

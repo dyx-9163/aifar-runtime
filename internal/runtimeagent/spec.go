@@ -23,6 +23,21 @@ const (
 	RuntimeVersion    = "v0.1"
 )
 
+const (
+	RuntimePhasePending     = "Pending"
+	RuntimePhasePulling     = "Pulling"
+	RuntimePhaseStarting    = "Starting"
+	RuntimePhaseRunning     = "Running"
+	RuntimePhaseDegraded    = "Degraded"
+	RuntimePhaseUpdating    = "Updating"
+	RuntimePhaseFailed      = "Failed"
+	RuntimePhaseTerminating = "Terminating"
+
+	ConditionTrue    = "True"
+	ConditionFalse   = "False"
+	ConditionUnknown = "Unknown"
+)
+
 type Runtime struct {
 	APIVersion string         `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty"`
 	Kind       string         `json:"kind,omitempty" yaml:"kind,omitempty"`
@@ -38,11 +53,13 @@ type ObjectMeta struct {
 }
 
 type RuntimeSpec struct {
-	Network     string           `json:"network,omitempty" yaml:"network,omitempty"`
-	Secrets     []SecretSpec     `json:"secrets,omitempty" yaml:"secrets,omitempty"`
-	Deployments []DeploymentSpec `json:"deployments,omitempty" yaml:"deployments,omitempty"`
-	Services    []ServiceSpec    `json:"services,omitempty" yaml:"services,omitempty"`
-	Ingress     []IngressSpec    `json:"ingress,omitempty" yaml:"ingress,omitempty"`
+	NodeName     string            `json:"nodeName,omitempty" yaml:"nodeName,omitempty"`
+	NodeSelector map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
+	Network      string            `json:"network,omitempty" yaml:"network,omitempty"`
+	Secrets      []SecretSpec      `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	Deployments  []DeploymentSpec  `json:"deployments,omitempty" yaml:"deployments,omitempty"`
+	Services     []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
+	Ingress      []IngressSpec     `json:"ingress,omitempty" yaml:"ingress,omitempty"`
 }
 
 type DeploymentSpec struct {
@@ -159,6 +176,7 @@ type IngressRoute struct {
 type RuntimeStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty" yaml:"observedGeneration,omitempty"`
 	Phase              string             `json:"phase,omitempty" yaml:"phase,omitempty"`
+	NodeName           string             `json:"nodeName,omitempty" yaml:"nodeName,omitempty"`
 	Conditions         []Condition        `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 	Deployments        []DeploymentStatus `json:"deployments,omitempty" yaml:"deployments,omitempty"`
 	Services           []ServiceStatus    `json:"services,omitempty" yaml:"services,omitempty"`
@@ -180,6 +198,7 @@ type DeploymentStatus struct {
 	Replicas int    `json:"replicas,omitempty" yaml:"replicas,omitempty"`
 	Image    string `json:"image,omitempty" yaml:"image,omitempty"`
 	Revision string `json:"revision,omitempty" yaml:"revision,omitempty"`
+	Restarts int    `json:"restarts,omitempty" yaml:"restarts,omitempty"`
 	Phase    string `json:"phase,omitempty" yaml:"phase,omitempty"`
 	Message  string `json:"message,omitempty" yaml:"message,omitempty"`
 }
@@ -203,6 +222,15 @@ type IngressStatus struct {
 type Endpoint struct {
 	Container string `json:"container,omitempty" yaml:"container,omitempty"`
 	Address   string `json:"address,omitempty" yaml:"address,omitempty"`
+}
+
+type NodeStatus struct {
+	Name              string            `json:"name,omitempty" yaml:"name,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Capacity          ResourceSpec      `json:"capacity,omitempty" yaml:"capacity,omitempty"`
+	Allocatable       ResourceSpec      `json:"allocatable,omitempty" yaml:"allocatable,omitempty"`
+	Ready             bool              `json:"ready" yaml:"ready"`
+	LastHeartbeatTime string            `json:"lastHeartbeatTime,omitempty" yaml:"lastHeartbeatTime,omitempty"`
 }
 
 type IntOrString struct {
@@ -324,6 +352,8 @@ func NormalizeRuntime(runtime Runtime) Runtime {
 	if strings.TrimSpace(runtime.Spec.Network) == "" {
 		runtime.Spec.Network = DefaultNetwork
 	}
+	runtime.Spec.NodeName = strings.TrimSpace(runtime.Spec.NodeName)
+	trimStringMap(runtime.Spec.NodeSelector)
 	for i := range runtime.Spec.Secrets {
 		secret := &runtime.Spec.Secrets[i]
 		secret.Name = strings.TrimSpace(secret.Name)
@@ -472,6 +502,14 @@ func ValidateRuntime(runtime Runtime) error {
 	}
 	if strings.TrimSpace(runtime.Spec.Network) == "" {
 		return errors.New("spec.network is required")
+	}
+	if runtime.Spec.NodeName != "" && !validDNSLabel(runtime.Spec.NodeName) {
+		return fmt.Errorf("spec.nodeName %q must use lowercase letters, digits, and '-'", runtime.Spec.NodeName)
+	}
+	for key, value := range runtime.Spec.NodeSelector {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			return errors.New("spec.nodeSelector keys and values must not be empty")
+		}
 	}
 	if len(runtime.Spec.Deployments) == 0 {
 		return errors.New("spec.deployments is required")

@@ -26,7 +26,7 @@ func TestStateStoreBackupAndRestore(t *testing.T) {
 	if err := source.SaveRuntime(runtime); err != nil {
 		t.Fatal(err)
 	}
-	status := NewStatus(runtime, "Ready", nil, nil)
+	status := NewStatus(runtime, RuntimePhaseRunning, nil, nil)
 	if err := source.SaveStatus(runtime, status); err != nil {
 		t.Fatal(err)
 	}

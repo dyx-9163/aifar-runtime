@@ -29,3 +29,25 @@ func TestManagerMetricsReportsRuntimeState(t *testing.T) {
 		t.Fatalf("endpoint count = %d", metrics.EndpointCount)
 	}
 }
+
+func TestManagerMetricsReportsDegradedAndRestarts(t *testing.T) {
+	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: newFakeDockerRunner()})
+	runtime := testRuntime(freePort(t), freePort(t))
+	key := KeyForRuntime(runtime)
+	status := NewStatusWithOptions(runtime, RuntimePhaseRunning, nil, nil, StatusOptions{
+		DeploymentRestarts: map[string]int{"api": 2},
+	})
+
+	manager.mu.Lock()
+	manager.specs[key.String()] = runtime
+	manager.statuses[key.String()] = status
+	manager.mu.Unlock()
+
+	metrics := manager.Metrics()
+	if metrics.DegradedRuntimeCount != 1 {
+		t.Fatalf("degraded runtime count = %d", metrics.DegradedRuntimeCount)
+	}
+	if metrics.ContainerRestarts != 2 {
+		t.Fatalf("container restarts = %d", metrics.ContainerRestarts)
+	}
+}

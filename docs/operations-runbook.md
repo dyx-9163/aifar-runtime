@@ -38,6 +38,8 @@ aifar-runtime status --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runti
 curl -fsS -H "Authorization: Bearer $(sudo cat /etc/aifar-runtime/secrets/api-token)" http://127.0.0.1:18081/metrics
 ```
 
+Review `/status` for `node.name`, active listeners, Runtime phases, and restart counts. A healthy steady state should show Runtime phase `Running` and deployment `ready == replicas`.
+
 ## Backup And Restore
 
 ```bash
@@ -76,6 +78,9 @@ sudo systemctl restart aifar-runtime
 | Docker readiness fails | Confirm Docker is running and the service user can access `/var/run/docker.sock`. |
 | Service or Ingress port is unavailable | Check whether another process owns the listen port with `ss -ltnp`. |
 | Runtime status is `Failed` | Inspect `aifar-runtime events --namespace <ns> --name <name>` and container logs. |
+| Runtime status is `Degraded` | Check deployment `ready`, `restarts`, and events for `ContainerRestarting` or `RestartLimitExceeded`. |
+| Runtime is rejected by node checks | Confirm `spec.nodeName` matches `node.name`, and `spec.nodeSelector` matches `node.labels` in `/etc/aifar-runtime/config.yaml`. |
+| A container keeps restarting | Inspect the deployment health check, container exit code, recent logs, and `selfHeal.maxRestarts` / `selfHeal.backoff`. |
 | State looks stale | Confirm `state.dir` ownership and restart the service to trigger load plus resync. |
 | Private image pull fails | Confirm the referenced `imagePullSecrets` secret and registry credentials, then inspect Docker auth errors in the event stream/logs. |
 

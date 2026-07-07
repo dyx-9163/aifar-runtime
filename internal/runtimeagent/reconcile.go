@@ -10,19 +10,25 @@ func (m *Manager) Resync(ctx context.Context) error {
 	defer m.reconcileMu.Unlock()
 	for _, runtime := range m.snapshotRuntimes() {
 		if err := m.reconcileDeployments(ctx, runtime); err != nil {
+			m.recordFailedStatus(runtime, err)
 			return err
 		}
 		refreshed, err := m.refreshRuntimeEndpoints(ctx, runtime)
 		if err != nil {
+			m.recordFailedStatus(runtime, err)
 			return err
 		}
 		key := KeyForRuntime(runtime)
+		status := NewStatusWithOptions(runtime, RuntimePhaseRunning, refreshed, nil, m.statusOptions(runtime))
 		m.mu.Lock()
 		for service, endpoints := range refreshed {
 			m.endpoints[endpointKey(key, service)] = endpoints
 		}
-		m.statuses[key.String()] = NewStatus(runtime, "Ready", refreshed, nil)
+		m.statuses[key.String()] = status
 		m.mu.Unlock()
+		if err := m.store.SaveStatus(runtime, status); err != nil {
+			return err
+		}
 	}
 	return nil
 }

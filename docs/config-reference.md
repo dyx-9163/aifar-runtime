@@ -10,6 +10,10 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `api.listen` | `127.0.0.1:18081` | Runtime HTTP API listen address. |
 | `api.readHeaderTimeout` | `10s` | Header read timeout for the Runtime API. |
 | `api.shutdownTimeout` | `30s` | Maximum graceful shutdown time for the API and proxy listeners. |
+| `node.name` | `local` | Local node identity. Runtime `spec.nodeName` must match this value when set. |
+| `node.labels` | empty | Local node labels used by Runtime `spec.nodeSelector`. |
+| `node.capacity` | empty | Reserved local node capacity declaration for future scheduling. |
+| `node.allocatable` | `node.capacity` | Reserved local node allocatable resources. Defaults to `capacity` when empty. |
 | `state.backend` | `file` | State backend. `etcd` is reserved for the future clustered control plane and is rejected until implemented. |
 | `state.dir` | `/var/lib/aifar-runtime` | Persistent specs, statuses, events, and proxy route state. |
 | `state.etcd.endpoints` | empty | Reserved etcd endpoints for future clustered storage. |
@@ -24,6 +28,9 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `container.readyPollInterval` | `3s` | Poll interval while waiting for container readiness. |
 | `container.diagnosticsLogTail` | `120` | Number of container log lines captured on readiness failure. |
 | `container.httpHealthCheckTemplate` | `wget -qO- http://127.0.0.1:%d%s >/dev/null` | Docker health check command template. It must include `%d` for port and `%s` for path. |
+| `selfHeal.enabled` | `true` | Enables automatic replacement of exited or unhealthy managed containers during resync. |
+| `selfHeal.maxRestarts` | `3` | Maximum restart attempts tracked per managed container before the Runtime stays `Degraded`. |
+| `selfHeal.backoff` | `10s` | Base restart backoff. Each retry waits `attempt * backoff`. |
 | `proxy.readHeaderTimeout` | `10s` | Header read timeout for Service and Ingress proxy listeners. |
 | `reconcile.interval` | `30s` | Periodic full reconciliation interval. |
 | `health.dockerTimeout` | `5s` | Docker readiness check timeout. |
@@ -45,7 +52,7 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | --- | --- |
 | `/healthz` | Liveness probe. Does not require Docker readiness or bearer auth. |
 | `/readyz` | Readiness probe. Does not require bearer auth. |
-| `/status` | Runtime API status, loaded Runtime resources, listeners, and build information. |
+| `/status` | Runtime API status, local node information, loaded Runtime resources, listeners, and build information. |
 | `/version` | Binary and Runtime contract version information. |
 | `/metrics` | Prometheus-compatible runtime metrics when enabled. |
 | `/apis/aifar.io/v1/namespaces/{namespace}/runtimes/{name}` | Rendered Runtime resource API. |
@@ -66,6 +73,9 @@ Rendered `Runtime` resources support local secrets, image pull credentials, roll
 
 ```yaml
 spec:
+  nodeName: local
+  nodeSelector:
+    zone: edge
   secrets:
     - name: regcred
       type: registry-auth
@@ -98,6 +108,23 @@ spec:
 ```
 
 `secret.data` values are base64 encoded, while `secret.stringData` values are plain strings and override `data` keys. `registry-auth` uses `docker login --password-stdin` followed by `docker pull`. `dockerconfigjson` secrets can provide `stringData.configPath` to use an existing Docker config directory.
+
+`spec.nodeName` is optional. When set, it must equal `node.name` on the local runtime process. `spec.nodeSelector` keys must match `node.labels`. These fields are single-node checks today and reserve the contract needed for a future etcd-backed scheduler.
+
+Runtime status phases are:
+
+| Phase | Meaning |
+| --- | --- |
+| `Pending` | Runtime accepted but reconciliation has not started provider work. |
+| `Pulling` | One or more deployment images are being pulled. |
+| `Starting` | Containers are being created or waited on. |
+| `Running` | Desired replicas and proxy endpoints are ready. |
+| `Degraded` | The Runtime is present but one or more desired replicas or endpoints are not ready. |
+| `Updating` | Existing Runtime is being replaced, rolled, or self-healed. |
+| `Failed` | Reconciliation failed and needs operator attention. |
+| `Terminating` | Delete has started and owned resources are being removed. |
+
+Core conditions include `SpecAccepted`, `NodeAssigned`, `ImagePulled`, `ContainerReady`, `ServicesReady`, and `IngressReady`. Deployment status includes `restarts`, which is incremented by runtime self-heal attempts.
 
 ## Backup And Restore
 

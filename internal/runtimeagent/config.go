@@ -32,9 +32,11 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 
 type RuntimeConfig struct {
 	API           APIConfig           `json:"api,omitempty" yaml:"api,omitempty"`
+	Node          NodeConfig          `json:"node,omitempty" yaml:"node,omitempty"`
 	State         StateConfig         `json:"state,omitempty" yaml:"state,omitempty"`
 	Docker        DockerConfig        `json:"docker,omitempty" yaml:"docker,omitempty"`
 	Container     ContainerConfig     `json:"container,omitempty" yaml:"container,omitempty"`
+	SelfHeal      SelfHealConfig      `json:"selfHeal,omitempty" yaml:"selfHeal,omitempty"`
 	Proxy         ProxyConfig         `json:"proxy,omitempty" yaml:"proxy,omitempty"`
 	Reconcile     ReconcileConfig     `json:"reconcile,omitempty" yaml:"reconcile,omitempty"`
 	Health        HealthConfig        `json:"health,omitempty" yaml:"health,omitempty"`
@@ -47,6 +49,13 @@ type APIConfig struct {
 	Listen            string   `json:"listen,omitempty" yaml:"listen,omitempty"`
 	ReadHeaderTimeout Duration `json:"readHeaderTimeout,omitempty" yaml:"readHeaderTimeout,omitempty"`
 	ShutdownTimeout   Duration `json:"shutdownTimeout,omitempty" yaml:"shutdownTimeout,omitempty"`
+}
+
+type NodeConfig struct {
+	Name        string            `json:"name,omitempty" yaml:"name,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Capacity    ResourceSpec      `json:"capacity,omitempty" yaml:"capacity,omitempty"`
+	Allocatable ResourceSpec      `json:"allocatable,omitempty" yaml:"allocatable,omitempty"`
 }
 
 type StateConfig struct {
@@ -74,6 +83,12 @@ type ContainerConfig struct {
 	ReadyPollInterval       Duration `json:"readyPollInterval,omitempty" yaml:"readyPollInterval,omitempty"`
 	DiagnosticsLogTail      int      `json:"diagnosticsLogTail,omitempty" yaml:"diagnosticsLogTail,omitempty"`
 	HTTPHealthCheckTemplate string   `json:"httpHealthCheckTemplate,omitempty" yaml:"httpHealthCheckTemplate,omitempty"`
+}
+
+type SelfHealConfig struct {
+	Enabled     *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	MaxRestarts int      `json:"maxRestarts,omitempty" yaml:"maxRestarts,omitempty"`
+	Backoff     Duration `json:"backoff,omitempty" yaml:"backoff,omitempty"`
 }
 
 type ProxyConfig struct {
@@ -124,6 +139,9 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			ReadHeaderTimeout: Duration{Duration: 10 * time.Second},
 			ShutdownTimeout:   Duration{Duration: 30 * time.Second},
 		},
+		Node: NodeConfig{
+			Name: "local",
+		},
 		State: StateConfig{
 			Backend: "file",
 			Dir:     DefaultStateDir,
@@ -144,6 +162,11 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			ReadyPollInterval:       Duration{Duration: 3 * time.Second},
 			DiagnosticsLogTail:      120,
 			HTTPHealthCheckTemplate: "wget -qO- http://127.0.0.1:%d%s >/dev/null",
+		},
+		SelfHeal: SelfHealConfig{
+			Enabled:     boolPtr(true),
+			MaxRestarts: 3,
+			Backoff:     Duration{Duration: 10 * time.Second},
 		},
 		Proxy: ProxyConfig{
 			ReadHeaderTimeout: Duration{Duration: 10 * time.Second},
@@ -195,6 +218,8 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.API.Listen = defaultString(config.API.Listen, defaults.API.Listen)
 	config.API.ReadHeaderTimeout = defaultDuration(config.API.ReadHeaderTimeout, defaults.API.ReadHeaderTimeout)
 	config.API.ShutdownTimeout = defaultDuration(config.API.ShutdownTimeout, defaults.API.ShutdownTimeout)
+	config.Node.Name = defaultString(config.Node.Name, defaults.Node.Name)
+	trimStringMap(config.Node.Labels)
 	config.State.Backend = strings.ToLower(defaultString(config.State.Backend, defaults.State.Backend))
 	config.State.Dir = defaultString(config.State.Dir, defaults.State.Dir)
 	config.State.Etcd.Prefix = defaultString(config.State.Etcd.Prefix, defaults.State.Etcd.Prefix)
@@ -213,6 +238,11 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 		config.Container.DiagnosticsLogTail = defaults.Container.DiagnosticsLogTail
 	}
 	config.Container.HTTPHealthCheckTemplate = defaultString(config.Container.HTTPHealthCheckTemplate, defaults.Container.HTTPHealthCheckTemplate)
+	config.SelfHeal.Enabled = defaultBoolPtr(config.SelfHeal.Enabled, true)
+	if config.SelfHeal.MaxRestarts <= 0 {
+		config.SelfHeal.MaxRestarts = defaults.SelfHeal.MaxRestarts
+	}
+	config.SelfHeal.Backoff = defaultDuration(config.SelfHeal.Backoff, defaults.SelfHeal.Backoff)
 	config.Proxy.ReadHeaderTimeout = defaultDuration(config.Proxy.ReadHeaderTimeout, defaults.Proxy.ReadHeaderTimeout)
 	config.Reconcile.Interval = defaultDuration(config.Reconcile.Interval, defaults.Reconcile.Interval)
 	config.Health.DockerTimeout = defaultDuration(config.Health.DockerTimeout, defaults.Health.DockerTimeout)
@@ -255,6 +285,15 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	if config.API.ShutdownTimeout.Duration <= 0 {
 		return errorsForField("api.shutdownTimeout", "must be greater than zero")
 	}
+	if !validDNSLabel(config.Node.Name) {
+		return errorsForField("node.name", "must use lowercase letters, digits, and '-'")
+	}
+	if err := validateConfigResourceSpec("node.capacity", config.Node.Capacity); err != nil {
+		return err
+	}
+	if err := validateConfigResourceSpec("node.allocatable", config.Node.Allocatable); err != nil {
+		return err
+	}
 	if config.Docker.EventDebounce.Duration <= 0 {
 		return errorsForField("docker.eventDebounce", "must be greater than zero")
 	}
@@ -272,6 +311,15 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	}
 	if !strings.Contains(config.Container.HTTPHealthCheckTemplate, "%d") || !strings.Contains(config.Container.HTTPHealthCheckTemplate, "%s") {
 		return errorsForField("container.httpHealthCheckTemplate", "must contain %d for port and %s for path")
+	}
+	if config.SelfHeal.Enabled == nil {
+		return errorsForField("selfHeal.enabled", "must be set")
+	}
+	if config.SelfHeal.MaxRestarts <= 0 {
+		return errorsForField("selfHeal.maxRestarts", "must be greater than zero")
+	}
+	if config.SelfHeal.Backoff.Duration <= 0 {
+		return errorsForField("selfHeal.backoff", "must be greater than zero")
 	}
 	if config.Proxy.ReadHeaderTimeout.Duration <= 0 {
 		return errorsForField("proxy.readHeaderTimeout", "must be greater than zero")
@@ -385,4 +433,31 @@ func defaultDuration(value, fallback Duration) Duration {
 		return fallback
 	}
 	return value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func defaultBoolPtr(value *bool, fallback bool) *bool {
+	if value != nil {
+		return value
+	}
+	return boolPtr(fallback)
+}
+
+func validateConfigResourceSpec(field string, resources ResourceSpec) error {
+	if resources.CPUs != "" && !cpuLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.CPUs))) {
+		return errorsForField(field+".cpus", "must be a positive decimal")
+	}
+	if resources.Memory != "" && !memoryLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.Memory))) {
+		return errorsForField(field+".memory", "must be a positive Docker memory value")
+	}
+	if resources.MemorySwap != "" && !memoryLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.MemorySwap))) {
+		return errorsForField(field+".memorySwap", "must be a positive Docker memory value")
+	}
+	if resources.PIDsLimit < 0 {
+		return errorsForField(field+".pidsLimit", "must be >= 0")
+	}
+	return nil
 }

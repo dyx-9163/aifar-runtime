@@ -3,6 +3,16 @@ api:
   readHeaderTimeout: 10s
   shutdownTimeout: 30s
 
+node:
+  name: local
+  labels: {}
+  capacity:
+    cpus: ""
+    memory: ""
+  allocatable:
+    cpus: ""
+    memory: ""
+
 state:
   backend: file
   dir: /var/lib/aifar-runtime
@@ -23,6 +33,11 @@ container:
   readyPollInterval: 3s
   diagnosticsLogTail: 120
   httpHealthCheckTemplate: "wget -qO- http://127.0.0.1:%d%s >/dev/null"
+
+selfHeal:
+  enabled: true
+  maxRestarts: 3
+  backoff: 10s
 
 proxy:
   readHeaderTimeout: 10s

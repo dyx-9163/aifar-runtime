@@ -113,6 +113,13 @@ func TestValidateRuntimeRejectsInvalidContract(t *testing.T) {
 			want: "listenPort",
 		},
 		{
+			name: "invalid node name",
+			mutate: func(runtime *Runtime) {
+				runtime.Spec.NodeName = "Edge_A"
+			},
+			want: "nodeName",
+		},
+		{
 			name: "selector no match",
 			mutate: func(runtime *Runtime) {
 				runtime.Spec.Services[0].Selector = map[string]string{"app": "missing"}
