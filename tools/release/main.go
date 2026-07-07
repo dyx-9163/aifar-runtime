@@ -202,6 +202,9 @@ func buildReleaseTarget(config releaseConfig, target releaseTarget, sbom []byte)
 	if err := os.MkdirAll(filepath.Join(stageDir, "docs"), 0o755); err != nil {
 		return releaseArtifact{}, err
 	}
+	if err := os.MkdirAll(filepath.Join(stageDir, "runtimes"), 0o755); err != nil {
+		return releaseArtifact{}, err
+	}
 	if err := os.MkdirAll(filepath.Join(stageDir, "release"), 0o755); err != nil {
 		return releaseArtifact{}, err
 	}
@@ -274,6 +277,9 @@ func copyReleaseFiles(stageDir string) error {
 		}
 	}
 	if err := copyDir("deploy/systemd", filepath.Join(stageDir, "deploy", "systemd")); err != nil {
+		return err
+	}
+	if err := copyDir("runtimes", filepath.Join(stageDir, "runtimes")); err != nil {
 		return err
 	}
 	return copyMarkdownFiles("docs", filepath.Join(stageDir, "docs"))

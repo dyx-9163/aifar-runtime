@@ -24,6 +24,7 @@ AIFAR Runtime is a single-node Kubernetes-like runtime controller. It accepts im
 cmd/aifar-runtime/          CLI and local HTTP API
 internal/runtimeagent/      runtime contract, reconciler, proxy, state store
 deploy/systemd/             systemd unit, config, sysusers, tmpfiles examples
+runtimes/                   example rendered Runtime resources for testing
 docs/config-reference.md    runtime configuration reference
 docs/operations-runbook.md  install, upgrade, rollback, troubleshooting
 docs/aifar-runtime-design.md resource contract design
@@ -55,6 +56,7 @@ aifar-runtime serve --listen 127.0.0.1:18081 --state-dir /var/lib/aifar-runtime
 aifar-runtime backup --out backup.json
 aifar-runtime restore --in backup.json
 aifar-runtime validate -f rendered-runtime.yaml
+aifar-runtime validate -f runtimes/demo-nginx.yaml
 aifar-runtime apply -f rendered-runtime.yaml
 aifar-runtime status --namespace prod --name demo
 aifar-runtime events --namespace prod --name demo --tail 100
