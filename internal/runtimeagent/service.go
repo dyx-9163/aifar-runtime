@@ -68,7 +68,7 @@ func (m *Manager) discoverEndpoints(ctx context.Context, runtime Runtime, servic
 
 func (m *Manager) discoverDeploymentEndpoints(ctx context.Context, runtime Runtime, deployment DeploymentSpec, targetPort int) ([]Endpoint, error) {
 	key := KeyForRuntime(runtime)
-	result, err := m.runner.Run(ctx, "docker",
+	result, err := m.docker(ctx,
 		"ps",
 		"--filter", "label=aifar.runtime/managed=true",
 		"--filter", "label=aifar.runtime/namespace="+key.Namespace,
@@ -77,7 +77,7 @@ func (m *Manager) discoverDeploymentEndpoints(ctx context.Context, runtime Runti
 		"--format", "{{.Names}}",
 	)
 	if err != nil || strings.TrimSpace(result.Stdout) == "" {
-		result, err = m.runner.Run(ctx, "docker",
+		result, err = m.docker(ctx,
 			"ps",
 			"--filter", "label=aifar.app=aifar",
 			"--filter", "label=aifar.component=pod",
@@ -93,7 +93,7 @@ func (m *Manager) discoverDeploymentEndpoints(ctx context.Context, runtime Runti
 	endpoints := make([]Endpoint, 0, len(names))
 	format := fmt.Sprintf(`{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks %q}}{{.IPAddress}}{{else}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}`, runtime.Spec.Network)
 	for _, name := range names {
-		inspect, err := m.runner.Run(ctx, "docker", "inspect", "-f", format, name)
+		inspect, err := m.docker(ctx, "inspect", "-f", format, name)
 		if err != nil {
 			continue
 		}

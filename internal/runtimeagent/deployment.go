@@ -13,10 +13,10 @@ func (m *Manager) ensureNetwork(ctx context.Context, network string) error {
 	if network == "" {
 		return errors.New("docker network is required")
 	}
-	if _, err := m.runner.Run(ctx, "docker", "network", "inspect", network); err == nil {
+	if _, err := m.docker(ctx, "network", "inspect", network); err == nil {
 		return nil
 	}
-	if _, err := m.runner.Run(ctx, "docker", "network", "create", network); err != nil {
+	if _, err := m.docker(ctx, "network", "create", network); err != nil {
 		return fmt.Errorf("ensure docker network %s: %w", network, err)
 	}
 	return nil
@@ -45,7 +45,7 @@ func (m *Manager) ensureDeployment(ctx context.Context, runtime Runtime, deploym
 				return err
 			}
 			if recreate {
-				if _, err := m.runner.Run(ctx, "docker", "rm", "-f", name); err != nil {
+				if _, err := m.docker(ctx, "rm", "-f", name); err != nil {
 					return fmt.Errorf("replace drifted AIFAR pod %s: %w", name, err)
 				}
 				exists = false
@@ -62,7 +62,7 @@ func (m *Manager) ensureDeployment(ctx context.Context, runtime Runtime, deploym
 
 func (m *Manager) removeExtraReplicas(ctx context.Context, runtime Runtime, deployment DeploymentSpec) error {
 	key := KeyForRuntime(runtime)
-	result, err := m.runner.Run(ctx, "docker",
+	result, err := m.docker(ctx,
 		"ps", "-a",
 		"--filter", "label=aifar.runtime/managed=true",
 		"--filter", "label=aifar.runtime/namespace="+key.Namespace,
@@ -89,7 +89,7 @@ func (m *Manager) removeExtraReplicas(ctx context.Context, runtime Runtime, depl
 			revision = strings.TrimSpace(parts[2])
 		}
 		if replica > deploymentReplicas(deployment) || (revision != "" && revision != deployment.Revision) {
-			if _, err := m.runner.Run(ctx, "docker", "rm", "-f", name); err != nil {
+			if _, err := m.docker(ctx, "rm", "-f", name); err != nil {
 				return fmt.Errorf("remove extra AIFAR pod %s: %w", name, err)
 			}
 			logf(m.log, "AIFAR runtime pod removed deployment=%s replica=%d container=%s\n", deployment.Name, replica, name)

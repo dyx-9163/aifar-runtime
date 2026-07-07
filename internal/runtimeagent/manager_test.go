@@ -72,6 +72,29 @@ func TestManagerApplyRecordsFailedSubresourceStatus(t *testing.T) {
 	}
 }
 
+func TestManagerShutdownStopsProxyListeners(t *testing.T) {
+	port := freePort(t)
+	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: newFakeDockerRunner()})
+	if err := manager.startPort(port); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("expected proxy port to be released: %v", err)
+	}
+	_ = listener.Close()
+	status := manager.Status()
+	listeners, _ := status["listeners"].([]int)
+	if len(listeners) != 0 {
+		t.Fatalf("expected listeners to be cleared, got %v", listeners)
+	}
+}
+
 func testRuntime(ingressPort, servicePort int) Runtime {
 	return NormalizeRuntime(Runtime{
 		APIVersion: DefaultAPIVersion,

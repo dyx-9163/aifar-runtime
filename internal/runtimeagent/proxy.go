@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 )
 
 func (m *Manager) startPort(port int) error {
@@ -23,7 +22,7 @@ func (m *Manager) startPort(port int) error {
 	}
 	server := &http.Server{
 		Handler:           http.HandlerFunc(m.handleProxy(port)),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: m.config.Proxy.ReadHeaderTimeout.Duration,
 	}
 	m.mu.Lock()
 	if _, exists := m.servers[port]; exists {

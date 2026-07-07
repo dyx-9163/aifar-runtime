@@ -17,6 +17,9 @@ AIFAR Runtime is a single-node Kubernetes-like runtime controller. It accepts im
 ```text
 cmd/aifar-runtime/          CLI and local HTTP API
 internal/runtimeagent/      runtime contract, reconciler, proxy, state store
+deploy/systemd/             systemd unit, config, sysusers, tmpfiles examples
+docs/config-reference.md    runtime configuration reference
+docs/operations-runbook.md  install, upgrade, rollback, troubleshooting
 docs/aifar-runtime-design.md resource contract design
 ```
 
@@ -24,7 +27,15 @@ docs/aifar-runtime-design.md resource contract design
 
 ```powershell
 go test ./...
-go build -o bin/aifar-runtime.exe ./cmd/aifar-runtime
+go vet ./...
+go build -trimpath -o bin/aifar-runtime.exe ./cmd/aifar-runtime
+```
+
+On Linux hosts with `make`:
+
+```bash
+make check
+make build
 ```
 
 ## CLI / 命令
@@ -43,9 +54,13 @@ aifar-runtime delete --namespace prod --name demo
 示例 unit 和环境文件位于 `deploy/systemd/`。
 
 ```bash
-go build -o aifar-runtime ./cmd/aifar-runtime
+go build -trimpath -o aifar-runtime ./cmd/aifar-runtime
 sudo install -m 0755 aifar-runtime /usr/local/bin/aifar-runtime
-sudo install -d -m 0755 /etc/aifar-runtime /var/lib/aifar-runtime
+sudo install -m 0644 deploy/systemd/aifar-runtime.sysusers.conf /etc/sysusers.d/aifar-runtime.conf
+sudo install -m 0644 deploy/systemd/aifar-runtime.tmpfiles.conf /etc/tmpfiles.d/aifar-runtime.conf
+sudo systemd-sysusers /etc/sysusers.d/aifar-runtime.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/aifar-runtime.conf
+sudo install -m 0644 deploy/systemd/aifar-runtime.yaml /etc/aifar-runtime/config.yaml
 sudo install -m 0644 deploy/systemd/aifar-runtime.env /etc/aifar-runtime/aifar-runtime.env
 sudo install -m 0644 deploy/systemd/aifar-runtime.service /etc/systemd/system/aifar-runtime.service
 sudo systemctl daemon-reload
@@ -53,7 +68,9 @@ sudo systemctl enable --now aifar-runtime
 sudo systemctl status aifar-runtime
 ```
 
-默认服务依赖本机 Docker，并以 systemd 默认用户运行。若改为非 root 用户运行，需要确保该用户可以访问 Docker socket，并可读写 `AIFAR_RUNTIME_STATE_DIR`。
+默认服务依赖本机 Docker，并以专用用户 `aifar-runtime` 运行。运行参数集中在 `/etc/aifar-runtime/config.yaml`。该用户需要通过 `docker` supplementary group 访问 Docker socket；如果发行版的 Docker 权限策略不同，需要调整 `deploy/systemd/aifar-runtime.service`。
+
+更多配置和运维步骤见 `docs/config-reference.md` 与 `docs/operations-runbook.md`。
 
 ## Minimal Runtime YAML / 最小 YAML
 

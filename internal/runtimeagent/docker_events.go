@@ -11,7 +11,7 @@ import (
 
 func (m *Manager) StartDockerEventSync(ctx context.Context, debounce time.Duration) {
 	if debounce <= 0 {
-		debounce = 2 * time.Second
+		debounce = m.config.Docker.EventDebounce.Duration
 	}
 	for ctx.Err() == nil {
 		if err := m.watchDockerEvents(ctx, debounce); err != nil && ctx.Err() == nil {
@@ -19,7 +19,7 @@ func (m *Manager) StartDockerEventSync(ctx context.Context, debounce time.Durati
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(m.config.Docker.EventBackoff.Duration):
 			}
 		}
 	}
@@ -57,8 +57,8 @@ func (m *Manager) watchDockerEvents(ctx context.Context, debounce time.Duration)
 	return wait()
 }
 
-func defaultDockerEventWatcher(ctx context.Context) (io.ReadCloser, io.ReadCloser, func() error, error) {
-	cmd := exec.CommandContext(ctx, "docker", "events",
+func defaultDockerEventWatcher(ctx context.Context, dockerCommand string) (io.ReadCloser, io.ReadCloser, func() error, error) {
+	cmd := exec.CommandContext(ctx, dockerCommand, "events",
 		"--filter", "type=container",
 		"--filter", "label=aifar.runtime/managed=true",
 		"--format", "{{.TimeNano}} {{.Action}} {{.Actor.Attributes.aifar.runtime/name}}",

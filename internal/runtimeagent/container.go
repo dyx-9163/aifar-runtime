@@ -12,7 +12,7 @@ import (
 )
 
 func (m *Manager) containerExists(ctx context.Context, name string) (bool, error) {
-	_, err := m.runner.Run(ctx, "docker", "inspect", "-f", "{{.Id}}", name)
+	_, err := m.docker(ctx, "inspect", "-f", "{{.Id}}", name)
 	if err == nil {
 		return true, nil
 	}
@@ -20,9 +20,9 @@ func (m *Manager) containerExists(ctx context.Context, name string) (bool, error
 }
 
 func (m *Manager) containerNeedsRecreate(ctx context.Context, name string, deployment DeploymentSpec) (bool, error) {
-	result, err := m.runner.Run(ctx, "docker", "inspect", "-f", `{{index .Config.Labels "aifar.runtime/spec-hash"}}`, name)
+	result, err := m.docker(ctx, "inspect", "-f", `{{index .Config.Labels "aifar.runtime/spec-hash"}}`, name)
 	if err != nil || strings.TrimSpace(result.Stdout) == "" {
-		result, err = m.runner.Run(ctx, "docker", "inspect", "-f", `{{index .Config.Labels "aifar.spec-hash"}}`, name)
+		result, err = m.docker(ctx, "inspect", "-f", `{{index .Config.Labels "aifar.spec-hash"}}`, name)
 	}
 	if err != nil {
 		return false, nil
@@ -33,7 +33,7 @@ func (m *Manager) containerNeedsRecreate(ctx context.Context, name string, deplo
 
 func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment DeploymentSpec, replica int, name string) error {
 	key := KeyForRuntime(runtime)
-	args := []string{"run", "-d", "--name", name, "--restart", "unless-stopped"}
+	args := []string{"run", "-d", "--name", name, "--restart", m.config.Docker.RestartPolicy}
 	args = append(args,
 		"--label", "aifar.runtime/managed=true",
 		"--label", "aifar.runtime/namespace="+key.Namespace,
@@ -50,8 +50,10 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 		"--label", fmt.Sprintf("aifar.replica=%d", replica),
 		"--label", "aifar.revision="+deployment.Revision,
 		"--network", runtime.Spec.Network,
-		"--add-host", "host.docker.internal:host-gateway",
 	)
+	if m.config.Docker.AddHost != "" {
+		args = append(args, "--add-host", m.config.Docker.AddHost)
+	}
 	for key, value := range deployment.Labels {
 		if strings.TrimSpace(key) != "" {
 			args = append(args, "--label", key+"="+value)
@@ -63,7 +65,7 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 	if deployment.Resources.Memory != "" {
 		args = append(args, "--memory", deployment.Resources.Memory, "--memory-swap", deployment.Resources.Memory)
 	}
-	if healthCommand := healthCheckCommand(deployment); healthCommand != "" {
+	if healthCommand := m.healthCheckCommand(deployment); healthCommand != "" {
 		args = append(args, "--health-cmd", healthCommand)
 		if deployment.HealthCheck.Interval != "" {
 			args = append(args, "--health-interval", deployment.HealthCheck.Interval)
@@ -119,7 +121,7 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 		}
 	}
 	args = append(args, deployment.Command...)
-	if _, err := m.runner.Run(ctx, "docker", args...); err != nil {
+	if _, err := m.docker(ctx, args...); err != nil {
 		return fmt.Errorf("start AIFAR pod %s: %w", name, err)
 	}
 	if err := m.waitContainerReady(ctx, name); err != nil {
@@ -130,10 +132,10 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 }
 
 func (m *Manager) waitContainerReady(ctx context.Context, name string) error {
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(m.config.Container.ReadyTimeout.Duration)
 	lastInspect := ""
 	for {
-		result, err := m.runner.Run(ctx, "docker", "inspect", "-f", `{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}`, name)
+		result, err := m.docker(ctx, "inspect", "-f", `{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}`, name)
 		if err == nil {
 			lastInspect = strings.TrimSpace(result.Stdout)
 			parts := strings.SplitN(strings.TrimSpace(result.Stdout), "|", 2)
@@ -161,7 +163,7 @@ func (m *Manager) waitContainerReady(ctx context.Context, name string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(3 * time.Second):
+		case <-time.After(m.config.Container.ReadyPollInterval.Duration):
 		}
 	}
 }
@@ -172,7 +174,7 @@ func (m *Manager) containerReadyDiagnostics(ctx context.Context, name, lastInspe
 		fmt.Fprintf(&b, "last inspect: %s\n", trimDiagnosticOutput(lastInspect, 1024))
 	}
 	inspectFormat := `status={{.State.Status}} running={{.State.Running}} exitCode={{.State.ExitCode}} error={{.State.Error}} oomKilled={{.State.OOMKilled}}{{if .State.Health}} health={{.State.Health.Status}}{{end}}`
-	if result, err := m.runner.Run(ctx, "docker", "inspect", "-f", inspectFormat, name); err != nil {
+	if result, err := m.docker(ctx, "inspect", "-f", inspectFormat, name); err != nil {
 		fmt.Fprintf(&b, "inspect failed: %v", err)
 		if strings.TrimSpace(result.Stderr) != "" {
 			fmt.Fprintf(&b, ": %s", trimDiagnosticOutput(strings.TrimSpace(result.Stderr), 1024))
@@ -182,10 +184,10 @@ func (m *Manager) containerReadyDiagnostics(ctx context.Context, name, lastInspe
 		fmt.Fprintf(&b, "inspect: %s\n", trimDiagnosticOutput(strings.TrimSpace(result.Stdout), 2048))
 	}
 	healthFormat := `{{if .State.Health}}{{range .State.Health.Log}}{{println .Start "exit=" .ExitCode "output=" .Output}}{{end}}{{end}}`
-	if result, err := m.runner.Run(ctx, "docker", "inspect", "-f", healthFormat, name); err == nil && strings.TrimSpace(result.Stdout) != "" {
+	if result, err := m.docker(ctx, "inspect", "-f", healthFormat, name); err == nil && strings.TrimSpace(result.Stdout) != "" {
 		fmt.Fprintf(&b, "health log:\n%s\n", trimDiagnosticOutput(strings.TrimSpace(result.Stdout), 4096))
 	}
-	if result, err := m.runner.Run(ctx, "docker", "logs", "--tail", "120", name); err != nil {
+	if result, err := m.docker(ctx, "logs", "--tail", strconv.Itoa(m.config.Container.DiagnosticsLogTail), name); err != nil {
 		fmt.Fprintf(&b, "logs failed: %v", err)
 		if strings.TrimSpace(result.Stderr) != "" {
 			fmt.Fprintf(&b, ": %s", trimDiagnosticOutput(strings.TrimSpace(result.Stderr), 1024))
@@ -279,7 +281,7 @@ func deploymentSpecHash(deployment DeploymentSpec) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func healthCheckCommand(deployment DeploymentSpec) string {
+func (m *Manager) healthCheckCommand(deployment DeploymentSpec) string {
 	if strings.TrimSpace(deployment.HealthCheck.Command) != "" {
 		return deployment.HealthCheck.Command
 	}
@@ -301,12 +303,12 @@ func healthCheckCommand(deployment DeploymentSpec) string {
 		return ""
 	}
 	path := cleanIngressPath(deployment.HealthCheck.HTTPGet.Path)
-	return fmt.Sprintf("wget -qO- http://127.0.0.1:%d%s >/dev/null", port, path)
+	return fmt.Sprintf(m.config.Container.HTTPHealthCheckTemplate, port, path)
 }
 
 func (m *Manager) removeOwnedContainers(ctx context.Context, runtime Runtime) error {
 	key := KeyForRuntime(runtime)
-	result, err := m.runner.Run(ctx, "docker",
+	result, err := m.docker(ctx,
 		"ps", "-a",
 		"--filter", "label=aifar.runtime/managed=true",
 		"--filter", "label=aifar.runtime/namespace="+key.Namespace,
@@ -317,7 +319,7 @@ func (m *Manager) removeOwnedContainers(ctx context.Context, runtime Runtime) er
 		return fmt.Errorf("list owned AIFAR pods for runtime %s: %w", key.String(), err)
 	}
 	for _, name := range strings.Fields(result.Stdout) {
-		if _, err := m.runner.Run(ctx, "docker", "rm", "-f", name); err != nil {
+		if _, err := m.docker(ctx, "rm", "-f", name); err != nil {
 			return fmt.Errorf("remove owned container %s: %w", name, err)
 		}
 	}

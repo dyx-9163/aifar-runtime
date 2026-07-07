@@ -11,14 +11,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
-	"time"
+	"syscall"
 
 	"aifar-runtime/internal/runtimeagent"
 )
 
-const defaultAPIAddr = "127.0.0.1:18081"
+const defaultAPIAddr = runtimeagent.DefaultAPIListen
 
 func main() {
 	if len(os.Args) < 2 {
@@ -34,7 +35,14 @@ func main() {
 func run(command string, args []string) error {
 	switch command {
 	case "health":
-		if err := dockerHealth(context.Background()); err != nil {
+		cmd := flag.NewFlagSet("health", flag.ExitOnError)
+		configPath := cmd.String("config", "", "path to runtime config yaml")
+		_ = cmd.Parse(args)
+		config, err := runtimeagent.LoadRuntimeConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		if err := dockerHealth(context.Background(), config); err != nil {
 			return err
 		}
 		fmt.Println(`{"status":"ok"}`)
@@ -119,14 +127,25 @@ func run(command string, args []string) error {
 		return nil
 	case "serve":
 		cmd := flag.NewFlagSet("serve", flag.ExitOnError)
-		listen := cmd.String("listen", defaultAPIAddr, "runtime API listen address")
+		configPath := cmd.String("config", "", "path to runtime config yaml")
+		listen := cmd.String("listen", "", "runtime API listen address override")
 		addr := cmd.String("addr", "", "runtime API listen address alias")
-		stateDir := cmd.String("state-dir", runtimeagent.DefaultStateDir, "runtime state directory")
+		stateDir := cmd.String("state-dir", "", "runtime state directory override")
 		_ = cmd.Parse(args)
+		config, err := runtimeagent.LoadRuntimeConfig(*configPath)
+		if err != nil {
+			return err
+		}
 		if strings.TrimSpace(*addr) != "" {
 			*listen = *addr
 		}
-		return serve(*listen, *stateDir)
+		if strings.TrimSpace(*listen) != "" {
+			config.API.Listen = strings.TrimSpace(*listen)
+		}
+		if strings.TrimSpace(*stateDir) != "" {
+			config.State.Dir = strings.TrimSpace(*stateDir)
+		}
+		return serve(config)
 	case "reconcile-runtime", "reconcile-ingress", "reconcile":
 		cmd := flag.NewFlagSet(command, flag.ExitOnError)
 		specPath := cmd.String("spec", "", "path to runtime spec json/yaml")
@@ -159,7 +178,8 @@ func run(command string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: aifar-runtime serve [--listen 127.0.0.1:18081] [--state-dir /var/lib/aifar-runtime]")
+	fmt.Fprintln(os.Stderr, "usage: aifar-runtime serve [--config /etc/aifar-runtime/config.yaml] [--listen 127.0.0.1:18081] [--state-dir /var/lib/aifar-runtime]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime health [--config /etc/aifar-runtime/config.yaml]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime validate -f rendered-runtime.yaml")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime apply -f rendered-runtime.yaml [--addr 127.0.0.1:18081]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime status [--namespace default --name demo] [--addr 127.0.0.1:18081]")
@@ -175,24 +195,67 @@ func readRuntimeFile(path string) (runtimeagent.Runtime, error) {
 	return runtimeagent.ParseRuntimeDocument(data)
 }
 
-func dockerHealth(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+func dockerHealth(ctx context.Context, config runtimeagent.RuntimeConfig) error {
+	config = runtimeagent.NormalizeRuntimeConfig(config)
+	if err := runtimeagent.ValidateRuntimeConfig(config); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, config.Health.DockerTimeout.Duration)
 	defer cancel()
-	_, err := runtimeagent.ExecRunner{}.Run(ctx, "docker", "info")
+	_, err := runtimeagent.ExecRunner{}.Run(ctx, config.Docker.Command, "info")
 	return err
 }
 
-func serve(addr, stateDir string) error {
-	ctx := context.Background()
-	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: stateDir, Log: os.Stdout})
+func serve(config runtimeagent.RuntimeConfig) error {
+	config = runtimeagent.NormalizeRuntimeConfig(config)
+	if err := runtimeagent.ValidateRuntimeConfig(config); err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{Config: config, Log: os.Stdout})
 	if err := manager.Load(ctx); err != nil {
 		return err
 	}
-	go manager.StartRuntimeResync(ctx, 30*time.Second)
-	go manager.StartDockerEventSync(ctx, 2*time.Second)
-	server := &http.Server{Addr: addr, Handler: newRuntimeHandler(manager, manager.Ready), ReadHeaderTimeout: 10 * time.Second}
-	log.Printf("aifar-runtime listening on %s", addr)
-	return server.ListenAndServe()
+	go manager.StartRuntimeResync(ctx, config.Reconcile.Interval.Duration)
+	go manager.StartDockerEventSync(ctx, config.Docker.EventDebounce.Duration)
+	server := &http.Server{
+		Addr:              config.API.Listen,
+		Handler:           newRuntimeHandler(manager, manager.Ready),
+		ReadHeaderTimeout: config.API.ReadHeaderTimeout.Duration,
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("aifar-runtime listening on %s", config.API.Listen)
+		err := server.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	select {
+	case err := <-serverErr:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.API.ShutdownTimeout.Duration)
+	defer cancel()
+	stop()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown runtime API: %w", err)
+	}
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	if err := <-serverErr; err != nil {
+		return err
+	}
+	log.Print("aifar-runtime stopped")
+	return nil
 }
 
 func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Context) error) http.Handler {

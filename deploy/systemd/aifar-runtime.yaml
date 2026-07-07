@@ -1,0 +1,29 @@
+api:
+  listen: 127.0.0.1:18081
+  readHeaderTimeout: 10s
+  shutdownTimeout: 30s
+
+state:
+  dir: /var/lib/aifar-runtime
+
+docker:
+  command: docker
+  restartPolicy: unless-stopped
+  addHost: host.docker.internal:host-gateway
+  eventDebounce: 2s
+  eventBackoff: 5s
+
+container:
+  readyTimeout: 5m
+  readyPollInterval: 3s
+  diagnosticsLogTail: 120
+  httpHealthCheckTemplate: "wget -qO- http://127.0.0.1:%d%s >/dev/null"
+
+proxy:
+  readHeaderTimeout: 10s
+
+reconcile:
+  interval: 30s
+
+health:
+  dockerTimeout: 5s

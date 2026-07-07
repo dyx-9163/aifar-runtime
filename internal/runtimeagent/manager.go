@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 type Reconciler struct {
@@ -30,6 +29,7 @@ func (r Reconciler) ReconcileRuntime(ctx context.Context, runtime Runtime) error
 
 type ManagerOptions struct {
 	StateDir     string
+	Config       RuntimeConfig
 	Runner       CommandRunner
 	Log          io.Writer
 	DockerEvents DockerEventWatcher
@@ -43,6 +43,7 @@ type Manager struct {
 	store        *StateStore
 	runner       CommandRunner
 	log          io.Writer
+	config       RuntimeConfig
 	dockerEvents DockerEventWatcher
 	specs        map[string]Runtime
 	statuses     map[string]RuntimeStatus
@@ -53,18 +54,25 @@ type Manager struct {
 }
 
 func NewManager(options ManagerOptions) *Manager {
+	config := NormalizeRuntimeConfig(options.Config)
+	if strings.TrimSpace(options.StateDir) != "" {
+		config.State.Dir = strings.TrimSpace(options.StateDir)
+	}
 	runner := options.Runner
 	if runner == nil {
 		runner = ExecRunner{}
 	}
 	dockerEvents := options.DockerEvents
 	if dockerEvents == nil {
-		dockerEvents = defaultDockerEventWatcher
+		dockerEvents = func(ctx context.Context) (io.ReadCloser, io.ReadCloser, func() error, error) {
+			return defaultDockerEventWatcher(ctx, config.Docker.Command)
+		}
 	}
 	return &Manager{
-		store:        NewStateStore(options.StateDir),
+		store:        NewStateStore(config.State.Dir),
 		runner:       runner,
 		log:          options.Log,
+		config:       config,
 		dockerEvents: dockerEvents,
 		specs:        map[string]Runtime{},
 		statuses:     map[string]RuntimeStatus{},
@@ -265,10 +273,42 @@ func (m *Manager) Ready(ctx context.Context) error {
 	if err := m.store.Ensure(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, m.config.Health.DockerTimeout.Duration)
 	defer cancel()
-	_, err := m.runner.Run(ctx, "docker", "info")
+	_, err := m.docker(ctx, "info")
 	return err
+}
+
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+
+	m.mu.Lock()
+	servers := m.servers
+	m.servers = map[int]*http.Server{}
+	m.routes = map[int][]proxyRoute{}
+	m.mu.Unlock()
+
+	ports := make([]int, 0, len(servers))
+	for port := range servers {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+
+	var shutdownErr error
+	for _, port := range ports {
+		if err := servers[port].Shutdown(ctx); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown proxy port %d: %w", port, err))
+		}
+	}
+	if err := m.writeProxyState(); err != nil {
+		shutdownErr = errors.Join(shutdownErr, err)
+	}
+	return shutdownErr
+}
+
+func (m *Manager) docker(ctx context.Context, args ...string) (CommandResult, error) {
+	return m.runner.Run(ctx, m.config.Docker.Command, args...)
 }
 
 func (m *Manager) nextGeneration(key RuntimeKey) int64 {
