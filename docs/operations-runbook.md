@@ -94,7 +94,34 @@ sudo systemctl restart aifar-runtime
 
 ```bash
 make release VERSION=0.1.0
-ls dist/aifar-runtime-0.1.0-linux-amd64.tar.gz
+ls dist/aifar-runtime-0.1.0-linux-amd64.tar.gz dist/checksums.txt dist/manifest.json dist/sbom.spdx.json
+sha256sum -c dist/checksums.txt
 ```
 
-The release package contains the Linux binary, systemd deployment files, README, project skill guide, and docs.
+The release package contains the Linux binary, systemd deployment files, README, project skill guide, docs, build metadata, and an SPDX SBOM. `dist/manifest.json` records artifact names, target platforms, binary SHA256 values, and archive SHA256 values.
+
+Run the supply-chain checks before publishing:
+
+```bash
+make vulncheck
+make sbom VERSION=0.1.0
+make release VERSION=0.1.0 RELEASE_TARGETS="linux/amd64 linux/arm64 windows/amd64"
+```
+
+If cosign is installed and keyless signing is configured, sign release artifacts:
+
+```bash
+make sign
+```
+
+## Integration Tests
+
+The integration test package is opt-in and does not connect to Docker or a live runtime unless an address is supplied:
+
+```bash
+go test -tags=integration ./tests/integration
+AIFAR_RUNTIME_INTEGRATION_ADDR=http://127.0.0.1:18081 AIFAR_RUNTIME_INTEGRATION_TOKEN="$TOKEN" go test -tags=integration ./tests/integration
+AIFAR_RUNTIME_INTEGRATION_ADDR=http://127.0.0.1:18081 AIFAR_RUNTIME_INTEGRATION_TOKEN="$TOKEN" AIFAR_RUNTIME_INTEGRATION_VALIDATE=1 go test -tags=integration ./tests/integration
+```
+
+The default integration smoke test checks `/healthz`, `/version`, and `/status`. The validate test only calls the Runtime validate API and uses `replicas: 0`, so it does not start containers.

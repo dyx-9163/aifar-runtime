@@ -1,0 +1,69 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version
+        required: true
+        default: "dev"
+      targets:
+        description: Space separated GOOS/GOARCH targets
+        required: true
+        default: "linux/amd64 linux/arm64 windows/amd64"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check
+        run: make check
+
+      - name: Vulnerability scan
+        run: make vulncheck
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          version="${{ github.event.inputs.version }}"
+          targets="${{ github.event.inputs.targets }}"
+          if [ -z "$version" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$targets" ]; then
+            targets="linux/amd64 linux/arm64 windows/amd64"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        run: make release VERSION="${{ steps.meta.outputs.version }}" COMMIT="${{ steps.meta.outputs.commit }}" BUILD_DATE="${{ steps.meta.outputs.build_date }}" RELEASE_TARGETS="${{ steps.meta.outputs.targets }}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aifar-runtime-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+            dist/manifest.json
+            dist/sbom.spdx.json

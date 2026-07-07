@@ -171,3 +171,17 @@ When adding a parameter:
 4. Add or update tests in `internal/runtimeagent/config_test.go`.
 5. Add the field to `deploy/systemd/aifar-runtime.yaml`.
 6. Document it in this file.
+
+## Release Outputs
+
+Release artifacts are produced by `make release` through `tools/release`:
+
+| File | Purpose |
+| --- | --- |
+| `dist/aifar-runtime-{version}-{os}-{arch}.tar.gz` | Linux/Unix release archive. |
+| `dist/aifar-runtime-{version}-{os}-{arch}.zip` | Windows release archive. |
+| `dist/checksums.txt` | SHA256 checksum file for archives. |
+| `dist/manifest.json` | Machine-readable release manifest with archive and binary hashes. |
+| `dist/sbom.spdx.json` | SPDX 2.3 software bill of materials for Go modules. |
+
+Release archives include `release/build.json` and `release/sbom.spdx.json` inside each platform package.

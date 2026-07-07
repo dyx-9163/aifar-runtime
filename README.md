@@ -43,7 +43,10 @@ On Linux hosts with `make`:
 make check
 make build
 make release VERSION=0.1.0
+make security VERSION=0.1.0
 ```
+
+`make release` writes versioned archives, `dist/checksums.txt`, `dist/manifest.json`, and `dist/sbom.spdx.json`.
 
 ## CLI / 命令
 

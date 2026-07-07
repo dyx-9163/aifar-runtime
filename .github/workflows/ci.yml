@@ -38,5 +38,24 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Integration test skeleton
+        run: go test -tags=integration ./tests/integration
+
+      - name: Vulnerability scan
+        run: make vulncheck
+
       - name: Build
-        run: go build -buildvcs=false -trimpath -o bin/aifar-runtime ./cmd/aifar-runtime
+        run: go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=ci -X main.commit=${GITHUB_SHA::12} -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/aifar-runtime ./cmd/aifar-runtime
+
+      - name: Release package smoke test
+        run: make release VERSION=ci COMMIT=${GITHUB_SHA::12} BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+      - name: Upload release smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aifar-runtime-ci-release
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/manifest.json
+            dist/sbom.spdx.json

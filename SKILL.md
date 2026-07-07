@@ -34,6 +34,7 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Keep Scheduler Lite as the admission boundary before provider actions. Global port conflicts and node resource capacity failures should reject the Runtime without starting Docker work or persisting the rejected spec.
 - Keep rolling updates failure-safe. If an update fails while a previous Runtime exists, restore the previous spec/status, remove failed new-generation containers, and write rollback events.
 - Keep audit logging enterprise-ready. Mutating API operations and local backup/restore operations should write structured audit events with actor, role, request ID, target Runtime, result, reason, and duration. New audit knobs must flow through config, systemd YAML, and docs.
+- Keep release engineering reproducible. Release changes should preserve `make check`, `make release`, checksums, manifest metadata, SPDX SBOM output, vulnerability scan entry points, and opt-in integration tests that never contact real Docker unless explicitly configured.
 
 ## GitHub Publishing
 
