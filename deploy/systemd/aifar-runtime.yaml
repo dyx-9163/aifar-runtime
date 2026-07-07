@@ -2,6 +2,7 @@ api:
   listen: 127.0.0.1:18081
   readHeaderTimeout: 10s
   shutdownTimeout: 30s
+  maxRequestBytes: 4194304
 
 node:
   name: local
@@ -58,6 +59,13 @@ security:
 
 observability:
   metricsEnabled: true
+
+audit:
+  enabled: true
+  path: /var/log/aifar-runtime/audit.jsonl
+  maxFileSize: 10485760
+  maxBackups: 5
+  includeReadOnly: false
 
 log:
   format: json

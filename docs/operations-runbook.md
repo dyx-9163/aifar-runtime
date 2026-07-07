@@ -35,10 +35,11 @@ systemctl status aifar-runtime
 journalctl -u aifar-runtime -n 200 --no-pager
 aifar-runtime health --config /etc/aifar-runtime/config.yaml
 aifar-runtime status --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runtime/secrets/api-token)"
+aifar-runtime audit --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runtime/secrets/api-token)" --tail 50
 curl -fsS -H "Authorization: Bearer $(sudo cat /etc/aifar-runtime/secrets/api-token)" http://127.0.0.1:18081/metrics
 ```
 
-Review `/status` for `node.name`, `scheduler.requested`, `scheduler.available`, active listeners, Runtime phases, and restart counts. A healthy steady state should show Runtime phase `Running` and deployment `ready == replicas`.
+Review `/status` for `node.name`, `scheduler.requested`, `scheduler.available`, active listeners, Runtime phases, and restart counts. Review `/audit` for recent apply/delete/backup/restore operations and denied requests. A healthy steady state should show Runtime phase `Running` and deployment `ready == replicas`.
 
 ## Backup And Restore
 
@@ -78,6 +79,8 @@ sudo systemctl restart aifar-runtime
 | Docker readiness fails | Confirm Docker is running and the service user can access `/var/run/docker.sock`. |
 | Service or Ingress port is unavailable | Check whether another process owns the listen port with `ss -ltnp`. |
 | Runtime status is `Failed` | Inspect `aifar-runtime events --namespace <ns> --name <name>` and container logs. |
+| An unexpected change happened | Inspect `aifar-runtime audit --namespace <ns> --name <name> --tail 100` for actor, request ID, result, and source IP. |
+| API access is denied | Check RBAC token role and inspect `aifar-runtime audit --actor <name> --result denied`. |
 | Runtime status is `Degraded` | Check deployment `ready`, `restarts`, and events for `ContainerRestarting` or `RestartLimitExceeded`. |
 | Runtime is rejected by node checks | Confirm `spec.nodeName` matches `node.name`, and `spec.nodeSelector` matches `node.labels` in `/etc/aifar-runtime/config.yaml`. |
 | Runtime is rejected by port admission | Check whether another Runtime already owns the Service `listenPort`, or whether an Ingress route has the same `listenPort`, overlapping host, and same path. |

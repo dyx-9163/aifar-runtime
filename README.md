@@ -14,6 +14,7 @@ AIFAR Runtime is a single-node Kubernetes-like runtime controller. It accepts im
 - Node model: single-node identity and selectors are available now, with a contract reserved for future clustered scheduling.
 - Scheduler Lite: Runtime apply is admitted before Docker actions, including global host-port conflict checks and node resource capacity checks.
 - Rollback: failed rolling updates keep the previous Runtime spec/status and remove failed new-generation containers.
+- Audit log: mutating API calls and local backup/restore operations are written as JSONL audit events with actor, role, request ID, target, result, and duration.
 - Service discovery: application-owned. Runtime does not register into Nacos, Eureka, Consul, or other registries.
 - Delete behavior: removes Runtime state, listeners, and owned containers only. It does not remove images, data directories, external services, or registry records.
 
@@ -54,6 +55,7 @@ aifar-runtime validate -f rendered-runtime.yaml
 aifar-runtime apply -f rendered-runtime.yaml
 aifar-runtime status --namespace prod --name demo
 aifar-runtime events --namespace prod --name demo --tail 100
+aifar-runtime audit --tail 100 --namespace prod --name demo
 aifar-runtime delete --namespace prod --name demo
 ```
 
@@ -78,7 +80,7 @@ sudo systemctl status aifar-runtime
 
 默认服务依赖本机 Docker，并以专用用户 `aifar-runtime` 运行。运行参数集中在 `/etc/aifar-runtime/config.yaml`。该用户需要通过 `docker` supplementary group 访问 Docker socket；如果发行版的 Docker 权限策略不同，需要调整 `deploy/systemd/aifar-runtime.service`。
 
-生产环境建议配置 `security.bearerTokenFile`，必要时同时配置 `security.tlsCertFile` / `security.tlsKeyFile`。控制面提供 `/healthz`、`/readyz`、`/status`、`/version`、`/metrics` 和 Runtime API。
+生产环境建议配置 `security.bearerTokenFile`，必要时同时配置 `security.tlsCertFile` / `security.tlsKeyFile`。控制面提供 `/healthz`、`/readyz`、`/status`、`/version`、`/metrics`、`/audit` 和 Runtime API。
 
 更多配置和运维步骤见 `docs/config-reference.md` 与 `docs/operations-runbook.md`。
 

@@ -33,6 +33,7 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Keep the single-node `node` model compatible with future etcd scheduling: validate `nodeName` and `nodeSelector`, but do not introduce distributed behavior without an explicit state backend implementation.
 - Keep Scheduler Lite as the admission boundary before provider actions. Global port conflicts and node resource capacity failures should reject the Runtime without starting Docker work or persisting the rejected spec.
 - Keep rolling updates failure-safe. If an update fails while a previous Runtime exists, restore the previous spec/status, remove failed new-generation containers, and write rollback events.
+- Keep audit logging enterprise-ready. Mutating API operations and local backup/restore operations should write structured audit events with actor, role, request ID, target Runtime, result, reason, and duration. New audit knobs must flow through config, systemd YAML, and docs.
 
 ## GitHub Publishing
 

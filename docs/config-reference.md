@@ -10,6 +10,7 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `api.listen` | `127.0.0.1:18081` | Runtime HTTP API listen address. |
 | `api.readHeaderTimeout` | `10s` | Header read timeout for the Runtime API. |
 | `api.shutdownTimeout` | `30s` | Maximum graceful shutdown time for the API and proxy listeners. |
+| `api.maxRequestBytes` | `4194304` | Maximum rendered Runtime request body size accepted by mutating API endpoints. |
 | `node.name` | `local` | Local node identity. Runtime `spec.nodeName` must match this value when set. |
 | `node.labels` | empty | Local node labels used by Runtime `spec.nodeSelector`. |
 | `node.capacity` | empty | Local node capacity used by Scheduler Lite admission. Empty resource fields are not enforced. |
@@ -43,6 +44,11 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `security.rbac.tokens[].role` | `admin` | `admin`, `operator`, or `viewer`. |
 | `security.rbac.tokens[].tokenFile` | empty | File containing the principal token. Prefer this over inline `token`. |
 | `observability.metricsEnabled` | `true` | Enables the Prometheus-compatible `/metrics` endpoint. |
+| `audit.enabled` | `true` | Enables JSONL audit logging for mutating API calls and local backup/restore operations. |
+| `audit.path` | `/var/log/aifar-runtime/audit.jsonl` | Audit log file path. |
+| `audit.maxFileSize` | `10485760` | Maximum audit log file size in bytes before internal rotation. |
+| `audit.maxBackups` | `5` | Number of rotated audit log files to keep. |
+| `audit.includeReadOnly` | `false` | When true, records read-only GET requests such as status, metrics, events, and audit queries. |
 | `log.format` | `json` | Process log format. Supported values: `json`, `text`. |
 | `log.level` | `info` | Reserved log level setting. Supported values: `debug`, `info`, `warn`, `error`. |
 
@@ -55,6 +61,7 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `/status` | Runtime API status, local node information, Scheduler Lite resource snapshot, loaded Runtime resources, listeners, and build information. |
 | `/version` | Binary and Runtime contract version information. |
 | `/metrics` | Prometheus-compatible runtime metrics when enabled. |
+| `/audit` | Audit event query endpoint when audit logging is enabled. Requires `admin` when RBAC is enabled. |
 | `/apis/aifar.io/v1/namespaces/{namespace}/runtimes/{name}` | Rendered Runtime resource API. |
 
 When `security.bearerToken`, `security.bearerTokenFile`, or `security.rbac.enabled` is configured, all endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
@@ -66,6 +73,15 @@ RBAC roles:
 | `admin` | All Runtime API operations. |
 | `operator` | Read, validate, apply, and reconcile. Delete is forbidden. |
 | `viewer` | Read-only GET requests. |
+
+`/audit` is admin-only under RBAC because it can expose operator names, source IPs, request IDs, and failure reasons.
+
+Audit events are written as JSON Lines and can also be queried through the CLI:
+
+```bash
+aifar-runtime audit --addr 127.0.0.1:18081 --token "$AIFAR_RUNTIME_TOKEN" --tail 100
+aifar-runtime audit --namespace prod --name demo --operation apply --result succeeded
+```
 
 ## Runtime Resource Additions
 

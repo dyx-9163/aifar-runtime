@@ -3,19 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"aifar-runtime/internal/runtimeagent"
 )
@@ -157,6 +162,30 @@ func run(command string, args []string) error {
 		}
 		fmt.Println(string(data))
 		return nil
+	case "audit":
+		cmd := flag.NewFlagSet("audit", flag.ExitOnError)
+		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
+		tail := cmd.Int("tail", 100, "audit event tail count")
+		namespace := cmd.String("namespace", "", "filter audit events by runtime namespace")
+		name := cmd.String("name", "", "filter audit events by runtime name")
+		actor := cmd.String("actor", "", "filter audit events by actor")
+		operation := cmd.String("operation", "", "filter audit events by operation")
+		result := cmd.String("result", "", "filter audit events by result")
+		token := cmd.String("token", defaultAPIToken(), "runtime API bearer token")
+		_ = cmd.Parse(args)
+		data, err := getAuditEvents(context.Background(), *addr, *token, runtimeagent.AuditQuery{
+			Tail:      *tail,
+			Namespace: *namespace,
+			Name:      *name,
+			Actor:     *actor,
+			Operation: *operation,
+			Result:    *result,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
 	case "delete":
 		cmd := flag.NewFlagSet("delete", flag.ExitOnError)
 		addr := cmd.String("addr", defaultAPIAddr, "runtime API address")
@@ -236,43 +265,81 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       aifar-runtime apply -f rendered-runtime.yaml [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime status [--namespace default --name demo] [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime events --namespace default --name demo [--tail 100] [--addr 127.0.0.1:18081] [--token ...]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime audit [--tail 100] [--namespace default] [--name demo] [--actor admin] [--operation apply] [--result succeeded] [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime delete --namespace default --name demo [--addr 127.0.0.1:18081] [--token ...]")
 }
 
 func backupState(config runtimeagent.RuntimeConfig, outPath string) error {
 	config = runtimeagent.NormalizeRuntimeConfig(config)
+	started := time.Now()
+	var resultErr error
+	defer func() {
+		appendLocalAudit(config, "backup", started, resultErr)
+	}()
 	if config.State.Backend != "file" {
-		return fmt.Errorf("backup is only supported for state.backend=file, got %s", config.State.Backend)
+		resultErr = fmt.Errorf("backup is only supported for state.backend=file, got %s", config.State.Backend)
+		return resultErr
 	}
 	store := runtimeagent.NewStateStore(config.State.Dir)
 	outPath = strings.TrimSpace(outPath)
 	if outPath == "" || outPath == "-" {
-		return store.BackupTo(os.Stdout)
+		resultErr = store.BackupTo(os.Stdout)
+		return resultErr
 	}
 	file, err := os.Create(outPath)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
 	defer file.Close()
-	return store.BackupTo(file)
+	resultErr = store.BackupTo(file)
+	return resultErr
 }
 
 func restoreState(config runtimeagent.RuntimeConfig, inPath string) error {
 	config = runtimeagent.NormalizeRuntimeConfig(config)
+	started := time.Now()
+	var resultErr error
+	defer func() {
+		appendLocalAudit(config, "restore", started, resultErr)
+	}()
 	if config.State.Backend != "file" {
-		return fmt.Errorf("restore is only supported for state.backend=file, got %s", config.State.Backend)
+		resultErr = fmt.Errorf("restore is only supported for state.backend=file, got %s", config.State.Backend)
+		return resultErr
 	}
 	store := runtimeagent.NewStateStore(config.State.Dir)
 	inPath = strings.TrimSpace(inPath)
 	if inPath == "" || inPath == "-" {
-		return store.RestoreFrom(os.Stdin)
+		resultErr = store.RestoreFrom(os.Stdin)
+		return resultErr
 	}
 	file, err := os.Open(inPath)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
 	defer file.Close()
-	return store.RestoreFrom(file)
+	resultErr = store.RestoreFrom(file)
+	return resultErr
+}
+
+func appendLocalAudit(config runtimeagent.RuntimeConfig, operation string, started time.Time, resultErr error) {
+	logger := runtimeagent.NewAuditLogger(config.Audit)
+	if logger == nil {
+		return
+	}
+	event := runtimeagent.AuditEvent{
+		Actor:      "local-cli",
+		Role:       "admin",
+		Operation:  operation,
+		Result:     runtimeagent.AuditResultSucceeded,
+		DurationMS: time.Since(started).Milliseconds(),
+	}
+	if resultErr != nil {
+		event.Result = runtimeagent.AuditResultFailed
+		event.Reason = resultErr.Error()
+	}
+	_ = logger.Append(event)
 }
 
 func readRuntimeFile(path string) (runtimeagent.Runtime, error) {
@@ -316,14 +383,17 @@ func serve(config runtimeagent.RuntimeConfig) error {
 	if err := manager.Load(ctx); err != nil {
 		return err
 	}
+	auditLogger := runtimeagent.NewAuditLogger(config.Audit)
 	go manager.StartRuntimeResync(ctx, config.Reconcile.Interval.Duration)
 	go manager.StartDockerEventSync(ctx, config.Docker.EventDebounce.Duration)
 	server := &http.Server{
 		Addr: config.API.Listen,
 		Handler: newRuntimeHandlerWithOptions(manager, manager.Ready, runtimeHandlerOptions{
-			AuthPolicies:   accessPoliciesForConfig(config),
-			MetricsEnabled: config.Observability.MetricsEnabled,
-			Build:          currentBuildInfo(),
+			AuthPolicies:    accessPoliciesForConfig(config),
+			MetricsEnabled:  config.Observability.MetricsEnabled,
+			MaxRequestBytes: config.API.MaxRequestBytes,
+			Audit:           auditLogger,
+			Build:           currentBuildInfo(),
 		}),
 		ReadHeaderTimeout: config.API.ReadHeaderTimeout.Duration,
 	}
@@ -366,10 +436,12 @@ func serve(config runtimeagent.RuntimeConfig) error {
 }
 
 type runtimeHandlerOptions struct {
-	AuthToken      string
-	AuthPolicies   []accessPolicy
-	MetricsEnabled bool
-	Build          buildInfo
+	AuthToken       string
+	AuthPolicies    []accessPolicy
+	MetricsEnabled  bool
+	MaxRequestBytes int64
+	Audit           *runtimeagent.AuditLogger
+	Build           buildInfo
 }
 
 func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Context) error) http.Handler {
@@ -382,6 +454,9 @@ func newRuntimeHandler(manager *runtimeagent.Manager, readyCheck func(context.Co
 func newRuntimeHandlerWithOptions(manager *runtimeagent.Manager, readyCheck func(context.Context) error, options runtimeHandlerOptions) http.Handler {
 	if options.Build.Version == "" {
 		options.Build = currentBuildInfo()
+	}
+	if options.MaxRequestBytes <= 0 {
+		options.MaxRequestBytes = runtimeagent.DefaultAPIMaxRequestBytes
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -438,15 +513,20 @@ func newRuntimeHandlerWithOptions(manager *runtimeagent.Manager, readyCheck func
 			writeMetrics(w, manager, options.Build)
 		})
 	}
+	if options.Audit != nil {
+		mux.HandleFunc("/audit", func(w http.ResponseWriter, r *http.Request) {
+			handleAuditAPI(options.Audit, w, r)
+		})
+	}
 	mux.HandleFunc("/apis/aifar.io/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
-		handleRuntimeAPI(manager, w, r)
+		handleRuntimeAPI(manager, w, r, options.MaxRequestBytes)
 	})
 	mux.HandleFunc("/runtime/reconcile", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		runtime, err := decodeRuntimeRequest(r)
+		runtime, err := decodeRuntimeRequest(r, options.MaxRequestBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -473,10 +553,10 @@ func newRuntimeHandlerWithOptions(manager *runtimeagent.Manager, readyCheck func
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	})
-	return withAPISecurity(mux, accessPoliciesForOptions(options))
+	return withAPIAudit(withAPISecurity(mux, accessPoliciesForOptions(options)), options.Audit)
 }
 
-func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *http.Request) {
+func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *http.Request, maxRequestBytes int64) {
 	namespace, name, subresource, validate, ok := parseRuntimeAPIPath(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -488,7 +568,7 @@ func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *h
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		runtime, err := decodeRuntimeRequest(r)
+		runtime, err := decodeRuntimeRequest(r, maxRequestBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -499,7 +579,7 @@ func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *h
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "valid", "runtime": runtimeagent.KeyForRuntime(runtime)})
 	case subresource == "" && r.Method == http.MethodPut:
-		runtime, err := decodeRuntimeRequest(r)
+		runtime, err := decodeRuntimeRequest(r, maxRequestBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -547,6 +627,31 @@ func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *h
 	}
 }
 
+func handleAuditAPI(audit *runtimeagent.AuditLogger, w http.ResponseWriter, r *http.Request) {
+	if audit == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	events, err := audit.Read(runtimeagent.AuditQuery{
+		Tail:      tail,
+		Namespace: r.URL.Query().Get("namespace"),
+		Name:      r.URL.Query().Get("name"),
+		Actor:     r.URL.Query().Get("actor"),
+		Operation: r.URL.Query().Get("operation"),
+		Result:    r.URL.Query().Get("result"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
 func parseRuntimeAPIPath(path string) (namespace, name, subresource string, validate bool, ok bool) {
 	prefix := "/apis/aifar.io/v1/namespaces/"
 	rest := strings.TrimPrefix(path, prefix)
@@ -569,11 +674,17 @@ func parseRuntimeAPIPath(path string) (namespace, name, subresource string, vali
 	return namespace, name, subresource, validate, namespace != "" && name != ""
 }
 
-func decodeRuntimeRequest(r *http.Request) (runtimeagent.Runtime, error) {
+func decodeRuntimeRequest(r *http.Request, maxRequestBytes int64) (runtimeagent.Runtime, error) {
 	defer r.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if maxRequestBytes <= 0 {
+		maxRequestBytes = runtimeagent.DefaultAPIMaxRequestBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
 	if err != nil {
 		return runtimeagent.Runtime{}, err
+	}
+	if int64(len(data)) > maxRequestBytes {
+		return runtimeagent.Runtime{}, fmt.Errorf("request body exceeds api.maxRequestBytes (%d bytes)", maxRequestBytes)
 	}
 	return runtimeagent.ParseRuntimeDocument(data)
 }
@@ -612,6 +723,33 @@ func getRuntimeEvents(ctx context.Context, addr, token, namespace, name string, 
 		url += "?tail=" + strconv.Itoa(tail)
 	}
 	return getURL(ctx, url, token)
+}
+
+func getAuditEvents(ctx context.Context, addr, token string, query runtimeagent.AuditQuery) ([]byte, error) {
+	values := url.Values{}
+	if query.Tail > 0 {
+		values.Set("tail", strconv.Itoa(query.Tail))
+	}
+	if strings.TrimSpace(query.Namespace) != "" {
+		values.Set("namespace", strings.TrimSpace(query.Namespace))
+	}
+	if strings.TrimSpace(query.Name) != "" {
+		values.Set("name", strings.TrimSpace(query.Name))
+	}
+	if strings.TrimSpace(query.Actor) != "" {
+		values.Set("actor", strings.TrimSpace(query.Actor))
+	}
+	if strings.TrimSpace(query.Operation) != "" {
+		values.Set("operation", strings.TrimSpace(query.Operation))
+	}
+	if strings.TrimSpace(query.Result) != "" {
+		values.Set("result", strings.TrimSpace(query.Result))
+	}
+	target := apiBaseURL(addr) + "/audit"
+	if encoded := values.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	return getURL(ctx, target, token)
 }
 
 func runtimeResourceURL(addr, namespace, name, subresource string) string {
@@ -725,9 +863,23 @@ func accessPoliciesForOptions(options runtimeHandlerOptions) []accessPolicy {
 	return policies
 }
 
+type requestPrincipal struct {
+	Actor string
+	Role  string
+}
+
+type requestPrincipalContextKey struct{}
+type requestPrincipalSlotContextKey struct{}
+
+type requestPrincipalSlot struct {
+	Principal requestPrincipal
+}
+
 func withAPISecurity(next http.Handler, policies []accessPolicy) http.Handler {
 	if len(policies) == 0 {
-		return next
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, requestWithPrincipal(r, requestPrincipal{Actor: "anonymous", Role: "admin"}))
+		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublicProbePath(r.URL.Path) {
@@ -736,15 +888,72 @@ func withAPISecurity(next http.Handler, policies []accessPolicy) http.Handler {
 		}
 		policy, ok := matchAccessPolicy(policies, r.Header.Get("Authorization"))
 		if !ok {
+			r = requestWithPrincipal(r, requestPrincipal{Actor: "unknown", Role: "none"})
 			w.Header().Set("WWW-Authenticate", `Bearer realm="aifar-runtime"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		r = requestWithPrincipal(r, requestPrincipal{Actor: policy.Name, Role: policy.Role})
 		if !policyAllowsRequest(policy, r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func requestWithPrincipal(r *http.Request, principal requestPrincipal) *http.Request {
+	if slot, ok := r.Context().Value(requestPrincipalSlotContextKey{}).(*requestPrincipalSlot); ok {
+		slot.Principal = principal
+	}
+	return r.WithContext(context.WithValue(r.Context(), requestPrincipalContextKey{}, principal))
+}
+
+func principalForRequest(r *http.Request) requestPrincipal {
+	if slot, ok := r.Context().Value(requestPrincipalSlotContextKey{}).(*requestPrincipalSlot); ok {
+		if slot.Principal.Actor != "" || slot.Principal.Role != "" {
+			return slot.Principal
+		}
+	}
+	if principal, ok := r.Context().Value(requestPrincipalContextKey{}).(requestPrincipal); ok {
+		return principal
+	}
+	return requestPrincipal{Actor: "unknown", Role: "unknown"}
+}
+
+func withAPIAudit(next http.Handler, audit *runtimeagent.AuditLogger) http.Handler {
+	if audit == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := requestIDForRequest(r)
+		w.Header().Set("X-Request-Id", requestID)
+		started := time.Now()
+		slot := &requestPrincipalSlot{}
+		r = r.WithContext(context.WithValue(r.Context(), requestPrincipalSlotContextKey{}, slot))
+		recorder := &auditResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		statusCode := recorder.status()
+		if !shouldAuditRequest(r, audit.IncludeReadOnly()) {
+			return
+		}
+		operation, namespace, name := auditTargetForRequest(r)
+		event := runtimeagent.AuditEvent{
+			RequestID:  requestID,
+			Actor:      principalForRequest(r).Actor,
+			Role:       principalForRequest(r).Role,
+			SourceIP:   sourceIPForRequest(r),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Operation:  operation,
+			Namespace:  namespace,
+			Name:       name,
+			Result:     auditResultForStatus(statusCode),
+			Reason:     auditReasonForStatus(statusCode, recorder.body()),
+			StatusCode: statusCode,
+			DurationMS: time.Since(started).Milliseconds(),
+		}
+		_ = audit.Append(event)
 	})
 }
 
@@ -768,12 +977,163 @@ func policyAllowsRequest(policy accessPolicy, r *http.Request) bool {
 	case "admin":
 		return true
 	case "operator":
+		if r.URL.Path == "/audit" {
+			return false
+		}
 		return r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodPut
 	case "viewer":
+		if r.URL.Path == "/audit" {
+			return false
+		}
 		return r.Method == http.MethodGet
 	default:
 		return false
 	}
+}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	bodyBytes  []byte
+}
+
+func (w *auditResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode != 0 {
+		return
+	}
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *auditResponseWriter) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if len(w.bodyBytes) < 512 {
+		remaining := 512 - len(w.bodyBytes)
+		if len(data) < remaining {
+			remaining = len(data)
+		}
+		w.bodyBytes = append(w.bodyBytes, data[:remaining]...)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *auditResponseWriter) status() int {
+	if w.statusCode == 0 {
+		return http.StatusOK
+	}
+	return w.statusCode
+}
+
+func (w *auditResponseWriter) body() string {
+	return string(w.bodyBytes)
+}
+
+func shouldAuditRequest(r *http.Request, includeReadOnly bool) bool {
+	if isPublicProbePath(r.URL.Path) {
+		return false
+	}
+	if includeReadOnly {
+		return true
+	}
+	return r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions
+}
+
+func auditTargetForRequest(r *http.Request) (operation, namespace, name string) {
+	if namespace, name, subresource, validate, ok := parseRuntimeAPIPath(r.URL.Path); ok {
+		if validate {
+			return "validate", namespace, name
+		}
+		switch r.Method {
+		case http.MethodPut:
+			return "apply", namespace, name
+		case http.MethodDelete:
+			return "delete", namespace, name
+		case http.MethodGet:
+			switch subresource {
+			case "status":
+				return "status", namespace, name
+			case "events":
+				return "events", namespace, name
+			default:
+				return "get", namespace, name
+			}
+		default:
+			return strings.ToLower(r.Method), namespace, name
+		}
+	}
+	if r.URL.Path == "/runtime/reconcile" {
+		return "legacy-reconcile", "", ""
+	}
+	if strings.HasPrefix(r.URL.Path, "/runtime/instances/") {
+		instance := strings.Trim(strings.TrimPrefix(r.URL.Path, "/runtime/instances/"), "/")
+		return "legacy-delete", runtimeagent.DefaultNamespace, instance
+	}
+	if r.URL.Path == "/audit" {
+		return "audit", "", ""
+	}
+	if r.URL.Path == "/status" {
+		return "status", "", ""
+	}
+	if r.URL.Path == "/version" {
+		return "version", "", ""
+	}
+	if r.URL.Path == "/metrics" {
+		return "metrics", "", ""
+	}
+	return "request", "", ""
+}
+
+func auditResultForStatus(statusCode int) string {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return runtimeagent.AuditResultDenied
+	}
+	if statusCode >= 400 {
+		return runtimeagent.AuditResultFailed
+	}
+	return runtimeagent.AuditResultSucceeded
+}
+
+func auditReasonForStatus(statusCode int, body string) string {
+	body = strings.TrimSpace(body)
+	if statusCode >= 400 && body != "" {
+		return body
+	}
+	if reason := http.StatusText(statusCode); reason != "" {
+		return reason
+	}
+	return "status " + strconv.Itoa(statusCode)
+}
+
+func requestIDForRequest(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("X-Request-Id")); value != "" {
+		return value
+	}
+	return newRequestID()
+}
+
+func newRequestID() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(data[:])
+}
+
+func sourceIPForRequest(r *http.Request) string {
+	forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if forwardedFor != "" {
+		if first, _, found := strings.Cut(forwardedFor, ","); found {
+			return strings.TrimSpace(first)
+		}
+		return forwardedFor
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func isPublicProbePath(path string) bool {

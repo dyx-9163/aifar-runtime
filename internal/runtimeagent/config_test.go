@@ -14,6 +14,7 @@ func TestLoadRuntimeConfigAppliesDefaultsAndOverrides(t *testing.T) {
 api:
   listen: 0.0.0.0:19081
   shutdownTimeout: 15s
+  maxRequestBytes: 8388608
 docker:
   command: podman
 node:
@@ -29,6 +30,11 @@ selfHeal:
   enabled: false
   maxRestarts: 5
   backoff: 2s
+audit:
+  path: /tmp/aifar-runtime-audit.jsonl
+  maxFileSize: 2048
+  maxBackups: 2
+  includeReadOnly: true
 log:
   format: text
 `), 0o644); err != nil {
@@ -56,6 +62,12 @@ log:
 	}
 	if config.API.ShutdownTimeout.Duration != 15*time.Second {
 		t.Fatalf("unexpected shutdown timeout: %s", config.API.ShutdownTimeout.Duration)
+	}
+	if config.API.MaxRequestBytes != 8388608 {
+		t.Fatalf("unexpected max request bytes: %d", config.API.MaxRequestBytes)
+	}
+	if config.Audit.Path != "/tmp/aifar-runtime-audit.jsonl" || config.Audit.MaxFileSize != 2048 || config.Audit.MaxBackups != 2 || !config.Audit.IncludeReadOnly {
+		t.Fatalf("unexpected audit config: %#v", config.Audit)
 	}
 	if config.Log.Format != "text" {
 		t.Fatalf("unexpected log format: %s", config.Log.Format)
@@ -115,6 +127,16 @@ func TestValidateRuntimeConfigRejectsInvalidSelfHealConfig(t *testing.T) {
 	err := ValidateRuntimeConfig(config)
 	if err == nil || !strings.Contains(err.Error(), "selfHeal.maxRestarts") {
 		t.Fatalf("expected selfHeal.maxRestarts validation error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsInvalidAuditConfig(t *testing.T) {
+	config := DefaultRuntimeConfig()
+	config.Audit.Path = ""
+
+	err := ValidateRuntimeConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "audit.path") {
+		t.Fatalf("expected audit.path validation error, got %v", err)
 	}
 }
 

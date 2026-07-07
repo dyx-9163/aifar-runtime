@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -104,6 +105,111 @@ func TestRuntimeHandlerAppliesLightweightRBAC(t *testing.T) {
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("operator delete code = %d", recorder.Code)
+	}
+}
+
+func TestRuntimeHandlerWritesAuditEvents(t *testing.T) {
+	enabled := true
+	audit := runtimeagent.NewAuditLogger(runtimeagent.AuditConfig{
+		Enabled:     &enabled,
+		Path:        filepath.Join(t.TempDir(), "audit.jsonl"),
+		MaxFileSize: 1024 * 1024,
+		MaxBackups:  2,
+	})
+	manager := runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir(), Runner: emptyDockerRunner{}})
+	handler := newRuntimeHandlerWithOptions(
+		manager,
+		manager.Ready,
+		runtimeHandlerOptions{
+			AuthPolicies: []accessPolicy{
+				{Name: "admin", Role: "admin", Token: "admin-token"},
+				{Name: "operator", Role: "operator", Token: "operator-token"},
+			},
+			MetricsEnabled: true,
+			Audit:          audit,
+			Build:          currentBuildInfo(),
+		},
+	)
+	servicePort := freeHTTPPort(t)
+	body := []byte(`
+apiVersion: aifar.io/v1
+kind: Runtime
+metadata:
+  name: demo
+  namespace: prod
+spec:
+  deployments:
+    - name: api
+      image: demo-api:1
+      replicas: 0
+      ports:
+        - name: http
+          containerPort: 9000
+  services:
+    - name: api
+      selector:
+        app: api
+      port: 9000
+      targetPort: http
+      listenPort: ` + strconv.Itoa(servicePort) + `
+`)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/apis/aifar.io/v1/namespaces/prod/runtimes/demo", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin-token")
+	req.Header.Set("X-Request-Id", "req-1")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("apply code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/apis/aifar.io/v1/namespaces/prod/runtimes/demo", nil)
+	req.Header.Set("Authorization", "Bearer operator-token")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("operator delete code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/audit?tail=10", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("audit code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Events []runtimeagent.AuditEvent `json:"events"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Events) != 2 {
+		t.Fatalf("expected 2 audit events, got %d: %s", len(response.Events), recorder.Body.String())
+	}
+	if response.Events[0].Actor != "admin" || response.Events[0].Operation != "apply" || response.Events[0].RequestID != "req-1" || response.Events[0].Result != runtimeagent.AuditResultSucceeded {
+		t.Fatalf("unexpected apply audit event: %#v", response.Events[0])
+	}
+	if response.Events[1].Actor != "operator" || response.Events[1].Operation != "delete" || response.Events[1].Result != runtimeagent.AuditResultDenied {
+		t.Fatalf("unexpected denied audit event: %#v", response.Events[1])
+	}
+}
+
+func TestRuntimeHandlerRejectsRequestOverConfiguredLimit(t *testing.T) {
+	handler := newRuntimeHandlerWithOptions(
+		runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir()}),
+		func(context.Context) error { return nil },
+		runtimeHandlerOptions{MetricsEnabled: true, MaxRequestBytes: 8, Build: currentBuildInfo()},
+	)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/apis/aifar.io/v1/namespaces/prod/runtimes/demo", strings.NewReader("apiVersion: aifar.io/v1\nkind: Runtime\n"))
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("large request code = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "api.maxRequestBytes") {
+		t.Fatalf("expected configured limit error, got %s", recorder.Body.String())
 	}
 }
 

@@ -11,6 +11,10 @@ import (
 )
 
 const DefaultAPIListen = "127.0.0.1:18081"
+const DefaultAPIMaxRequestBytes int64 = 4 * 1024 * 1024
+const DefaultAuditPath = "/var/log/aifar-runtime/audit.jsonl"
+const DefaultAuditMaxFileSize int64 = 10 * 1024 * 1024
+const DefaultAuditMaxBackups = 5
 
 type Duration struct {
 	time.Duration
@@ -42,6 +46,7 @@ type RuntimeConfig struct {
 	Health        HealthConfig        `json:"health,omitempty" yaml:"health,omitempty"`
 	Security      SecurityConfig      `json:"security,omitempty" yaml:"security,omitempty"`
 	Observability ObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty"`
+	Audit         AuditConfig         `json:"audit,omitempty" yaml:"audit,omitempty"`
 	Log           LogConfig           `json:"log,omitempty" yaml:"log,omitempty"`
 }
 
@@ -49,6 +54,7 @@ type APIConfig struct {
 	Listen            string   `json:"listen,omitempty" yaml:"listen,omitempty"`
 	ReadHeaderTimeout Duration `json:"readHeaderTimeout,omitempty" yaml:"readHeaderTimeout,omitempty"`
 	ShutdownTimeout   Duration `json:"shutdownTimeout,omitempty" yaml:"shutdownTimeout,omitempty"`
+	MaxRequestBytes   int64    `json:"maxRequestBytes,omitempty" yaml:"maxRequestBytes,omitempty"`
 }
 
 type NodeConfig struct {
@@ -127,6 +133,14 @@ type ObservabilityConfig struct {
 	MetricsEnabled bool `json:"metricsEnabled,omitempty" yaml:"metricsEnabled,omitempty"`
 }
 
+type AuditConfig struct {
+	Enabled         *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Path            string `json:"path,omitempty" yaml:"path,omitempty"`
+	MaxFileSize     int64  `json:"maxFileSize,omitempty" yaml:"maxFileSize,omitempty"`
+	MaxBackups      int    `json:"maxBackups,omitempty" yaml:"maxBackups,omitempty"`
+	IncludeReadOnly bool   `json:"includeReadOnly,omitempty" yaml:"includeReadOnly,omitempty"`
+}
+
 type LogConfig struct {
 	Format string `json:"format,omitempty" yaml:"format,omitempty"`
 	Level  string `json:"level,omitempty" yaml:"level,omitempty"`
@@ -138,6 +152,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			Listen:            DefaultAPIListen,
 			ReadHeaderTimeout: Duration{Duration: 10 * time.Second},
 			ShutdownTimeout:   Duration{Duration: 30 * time.Second},
+			MaxRequestBytes:   DefaultAPIMaxRequestBytes,
 		},
 		Node: NodeConfig{
 			Name: "local",
@@ -180,6 +195,12 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		Observability: ObservabilityConfig{
 			MetricsEnabled: true,
 		},
+		Audit: AuditConfig{
+			Enabled:     boolPtr(true),
+			Path:        DefaultAuditPath,
+			MaxFileSize: DefaultAuditMaxFileSize,
+			MaxBackups:  DefaultAuditMaxBackups,
+		},
 		Log: LogConfig{
 			Format: "json",
 			Level:  "info",
@@ -218,6 +239,9 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.API.Listen = defaultString(config.API.Listen, defaults.API.Listen)
 	config.API.ReadHeaderTimeout = defaultDuration(config.API.ReadHeaderTimeout, defaults.API.ReadHeaderTimeout)
 	config.API.ShutdownTimeout = defaultDuration(config.API.ShutdownTimeout, defaults.API.ShutdownTimeout)
+	if config.API.MaxRequestBytes <= 0 {
+		config.API.MaxRequestBytes = defaults.API.MaxRequestBytes
+	}
 	config.Node.Name = defaultString(config.Node.Name, defaults.Node.Name)
 	trimStringMap(config.Node.Labels)
 	config.State.Backend = strings.ToLower(defaultString(config.State.Backend, defaults.State.Backend))
@@ -257,6 +281,7 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 		token.Token = strings.TrimSpace(token.Token)
 		token.TokenFile = strings.TrimSpace(token.TokenFile)
 	}
+	config.Audit = normalizeAuditConfig(config.Audit)
 	config.Log.Format = strings.ToLower(defaultString(config.Log.Format, defaults.Log.Format))
 	config.Log.Level = strings.ToLower(defaultString(config.Log.Level, defaults.Log.Level))
 	return config
@@ -284,6 +309,9 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	}
 	if config.API.ShutdownTimeout.Duration <= 0 {
 		return errorsForField("api.shutdownTimeout", "must be greater than zero")
+	}
+	if config.API.MaxRequestBytes <= 0 {
+		return errorsForField("api.maxRequestBytes", "must be greater than zero")
 	}
 	if !validDNSLabel(config.Node.Name) {
 		return errorsForField("node.name", "must use lowercase letters, digits, and '-'")
@@ -353,6 +381,20 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 		}
 		if token.Token != "" && token.TokenFile != "" {
 			return errorsForField("security.rbac.tokens.tokenFile", "must not be set with token")
+		}
+	}
+	if config.Audit.Enabled == nil {
+		return errorsForField("audit.enabled", "must be set")
+	}
+	if *config.Audit.Enabled {
+		if strings.TrimSpace(config.Audit.Path) == "" {
+			return errorsForField("audit.path", "must not be empty when audit is enabled")
+		}
+		if config.Audit.MaxFileSize <= 0 {
+			return errorsForField("audit.maxFileSize", "must be greater than zero")
+		}
+		if config.Audit.MaxBackups < 0 {
+			return errorsForField("audit.maxBackups", "must be >= 0")
 		}
 	}
 	switch config.Log.Format {
@@ -444,6 +486,18 @@ func defaultBoolPtr(value *bool, fallback bool) *bool {
 		return value
 	}
 	return boolPtr(fallback)
+}
+
+func normalizeAuditConfig(config AuditConfig) AuditConfig {
+	config.Enabled = defaultBoolPtr(config.Enabled, true)
+	config.Path = defaultString(config.Path, DefaultAuditPath)
+	if config.MaxFileSize <= 0 {
+		config.MaxFileSize = DefaultAuditMaxFileSize
+	}
+	if config.MaxBackups == 0 {
+		config.MaxBackups = DefaultAuditMaxBackups
+	}
+	return config
 }
 
 func validateConfigResourceSpec(field string, resources ResourceSpec) error {
