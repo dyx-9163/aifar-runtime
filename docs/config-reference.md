@@ -10,7 +10,11 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `api.listen` | `127.0.0.1:18081` | Runtime HTTP API listen address. |
 | `api.readHeaderTimeout` | `10s` | Header read timeout for the Runtime API. |
 | `api.shutdownTimeout` | `30s` | Maximum graceful shutdown time for the API and proxy listeners. |
+| `state.backend` | `file` | State backend. `etcd` is reserved for the future clustered control plane and is rejected until implemented. |
 | `state.dir` | `/var/lib/aifar-runtime` | Persistent specs, statuses, events, and proxy route state. |
+| `state.etcd.endpoints` | empty | Reserved etcd endpoints for future clustered storage. |
+| `state.etcd.prefix` | `/aifar-runtime` | Reserved etcd key prefix. |
+| `state.etcd.dialTimeout` | `5s` | Reserved etcd dial timeout. |
 | `docker.command` | `docker` | Container CLI used by the runtime. |
 | `docker.restartPolicy` | `unless-stopped` | Restart policy applied to managed containers. |
 | `docker.addHost` | `host.docker.internal:host-gateway` | Host mapping injected into managed containers. |
@@ -27,6 +31,10 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `security.bearerTokenFile` | empty | File containing the Runtime API bearer token. |
 | `security.tlsCertFile` | empty | Optional TLS certificate file for the Runtime API. Must be set with `tlsKeyFile`. |
 | `security.tlsKeyFile` | empty | Optional TLS key file for the Runtime API. Must be set with `tlsCertFile`. |
+| `security.rbac.enabled` | `false` | Enables lightweight token RBAC. Do not combine with `bearerToken` or `bearerTokenFile`. |
+| `security.rbac.tokens[].name` | empty | Token principal name. |
+| `security.rbac.tokens[].role` | `admin` | `admin`, `operator`, or `viewer`. |
+| `security.rbac.tokens[].tokenFile` | empty | File containing the principal token. Prefer this over inline `token`. |
 | `observability.metricsEnabled` | `true` | Enables the Prometheus-compatible `/metrics` endpoint. |
 | `log.format` | `json` | Process log format. Supported values: `json`, `text`. |
 | `log.level` | `info` | Reserved log level setting. Supported values: `debug`, `info`, `warn`, `error`. |
@@ -42,7 +50,63 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `/metrics` | Prometheus-compatible runtime metrics when enabled. |
 | `/apis/aifar.io/v1/namespaces/{namespace}/runtimes/{name}` | Rendered Runtime resource API. |
 
-When `security.bearerToken` or `security.bearerTokenFile` is configured, all endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
+When `security.bearerToken`, `security.bearerTokenFile`, or `security.rbac.enabled` is configured, all endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
+
+RBAC roles:
+
+| Role | Access |
+| --- | --- |
+| `admin` | All Runtime API operations. |
+| `operator` | Read, validate, apply, and reconcile. Delete is forbidden. |
+| `viewer` | Read-only GET requests. |
+
+## Runtime Resource Additions
+
+Rendered `Runtime` resources support local secrets, image pull credentials, rolling update strategy, and stricter resources:
+
+```yaml
+spec:
+  secrets:
+    - name: regcred
+      type: registry-auth
+      stringData:
+        server: registry.local
+        username: robot
+        password: ${rendered-password}
+    - name: app-env
+      type: opaque
+      stringData:
+        API_KEY: ${rendered-api-key}
+  deployments:
+    - name: api
+      image: registry.local/demo-api:1.0.0
+      imagePullSecrets:
+        - name: regcred
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 1
+          maxUnavailable: 0
+      envFrom:
+        - type: secret
+          name: app-env
+      resources:
+        cpus: "0.5"
+        memory: 256Mi
+        memorySwap: 512Mi
+        pidsLimit: 128
+```
+
+`secret.data` values are base64 encoded, while `secret.stringData` values are plain strings and override `data` keys. `registry-auth` uses `docker login --password-stdin` followed by `docker pull`. `dockerconfigjson` secrets can provide `stringData.configPath` to use an existing Docker config directory.
+
+## Backup And Restore
+
+```bash
+aifar-runtime backup --config /etc/aifar-runtime/config.yaml --out /var/backups/aifar-runtime/state.json
+aifar-runtime restore --config /etc/aifar-runtime/config.yaml --in /var/backups/aifar-runtime/state.json
+```
+
+Backup and restore currently support `state.backend=file`.
 
 ## Change Rule
 

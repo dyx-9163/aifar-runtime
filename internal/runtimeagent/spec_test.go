@@ -147,6 +147,80 @@ func TestValidateRuntimeAllowsReplicasZero(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeValidatesSecretsStrategyAndResources(t *testing.T) {
+	runtime := testRuntime(18080, 19000)
+	runtime.Spec.Secrets = []SecretSpec{{
+		Name: "regcred",
+		Type: "registry-auth",
+		StringData: map[string]string{
+			"server":   "registry.local",
+			"username": "robot",
+			"password": "secret",
+		},
+	}}
+	runtime.Spec.Deployments[0].ImagePullSecrets = []LocalObjectReference{{Name: "regcred"}}
+	runtime.Spec.Deployments[0].Strategy = DeploymentStrategy{
+		Type:          "RollingUpdate",
+		RollingUpdate: &RollingUpdateStrategy{MaxSurge: 1},
+	}
+	runtime.Spec.Deployments[0].Resources = ResourceSpec{CPUs: "0.5", Memory: "256Mi", MemorySwap: "512Mi", PIDsLimit: 128}
+	runtime.Spec.Deployments[0].HealthCheck.Interval = "5s"
+
+	if err := ValidateRuntime(runtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRuntimeRejectsInvalidSecretAndResourceReferences(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Runtime)
+		want   string
+	}{
+		{
+			name: "missing image pull secret",
+			mutate: func(runtime *Runtime) {
+				runtime.Spec.Deployments[0].ImagePullSecrets = []LocalObjectReference{{Name: "missing"}}
+			},
+			want: "imagePullSecret",
+		},
+		{
+			name: "invalid memory",
+			mutate: func(runtime *Runtime) {
+				runtime.Spec.Deployments[0].Resources.Memory = "a lot"
+			},
+			want: "resources.memory",
+		},
+		{
+			name: "invalid secret data",
+			mutate: func(runtime *Runtime) {
+				runtime.Spec.Secrets = []SecretSpec{{
+					Name: "bad-secret",
+					Type: "opaque",
+					Data: map[string]string{"PASSWORD": "not base64"},
+				}}
+			},
+			want: "base64",
+		},
+		{
+			name: "invalid health duration",
+			mutate: func(runtime *Runtime) {
+				runtime.Spec.Deployments[0].HealthCheck.Timeout = "soon"
+			},
+			want: "healthCheck.timeout",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			runtime := testRuntime(18080, 19000)
+			tt.mutate(&runtime)
+			if err := ValidateRuntime(runtime); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestLegacyRuntimeSpecIsReadOnlyCompatible(t *testing.T) {
 	runtime, err := ParseRuntimeDocument([]byte(`{
   "instanceId": "admin",

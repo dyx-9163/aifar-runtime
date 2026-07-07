@@ -45,6 +45,12 @@ func (m *Manager) ensureDeployment(ctx context.Context, runtime Runtime, deploym
 				return err
 			}
 			if recreate {
+				if deployment.Strategy.Type == "rollingupdate" && deployment.Strategy.RollingUpdate != nil && deployment.Strategy.RollingUpdate.MaxSurge > 0 {
+					if err := m.replaceContainerWithSurge(ctx, runtime, deployment, replica, name); err != nil {
+						return err
+					}
+					continue
+				}
 				if _, err := m.docker(ctx, "rm", "-f", name); err != nil {
 					return fmt.Errorf("replace drifted AIFAR pod %s: %w", name, err)
 				}
@@ -58,6 +64,20 @@ func (m *Manager) ensureDeployment(ctx context.Context, runtime Runtime, deploym
 		}
 	}
 	return m.removeExtraReplicas(ctx, runtime, deployment)
+}
+
+func (m *Manager) replaceContainerWithSurge(ctx context.Context, runtime Runtime, deployment DeploymentSpec, replica int, canonicalName string) error {
+	surgeName := sanitizeDockerName(fmt.Sprintf("%s-surge-g%d", canonicalName, runtime.Metadata.Generation))
+	if err := m.runContainer(ctx, runtime, deployment, replica, surgeName); err != nil {
+		return err
+	}
+	if _, err := m.docker(ctx, "rm", "-f", canonicalName); err != nil {
+		return fmt.Errorf("replace drifted AIFAR pod %s: %w", canonicalName, err)
+	}
+	if _, err := m.docker(ctx, "rename", surgeName, canonicalName); err != nil {
+		return fmt.Errorf("rename surge AIFAR pod %s to %s: %w", surgeName, canonicalName, err)
+	}
+	return nil
 }
 
 func (m *Manager) removeExtraReplicas(ctx context.Context, runtime Runtime, deployment DeploymentSpec) error {

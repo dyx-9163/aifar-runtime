@@ -30,6 +30,7 @@ func (r Reconciler) ReconcileRuntime(ctx context.Context, runtime Runtime) error
 type ManagerOptions struct {
 	StateDir     string
 	Config       RuntimeConfig
+	Store        RuntimeStateStore
 	Runner       CommandRunner
 	Log          io.Writer
 	DockerEvents DockerEventWatcher
@@ -40,7 +41,7 @@ type DockerEventWatcher func(ctx context.Context) (stdout io.ReadCloser, stderr 
 type Manager struct {
 	mu           sync.RWMutex
 	reconcileMu  sync.Mutex
-	store        *StateStore
+	store        RuntimeStateStore
 	runner       CommandRunner
 	log          io.Writer
 	config       RuntimeConfig
@@ -62,6 +63,10 @@ func NewManager(options ManagerOptions) *Manager {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
+	store := options.Store
+	if store == nil {
+		store = NewStateStore(config.State.Dir)
+	}
 	dockerEvents := options.DockerEvents
 	if dockerEvents == nil {
 		dockerEvents = func(ctx context.Context) (io.ReadCloser, io.ReadCloser, func() error, error) {
@@ -69,7 +74,7 @@ func NewManager(options ManagerOptions) *Manager {
 		}
 	}
 	return &Manager{
-		store:        NewStateStore(config.State.Dir),
+		store:        store,
 		runner:       runner,
 		log:          options.Log,
 		config:       config,

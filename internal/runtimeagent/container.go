@@ -3,9 +3,12 @@ package runtimeagent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +35,9 @@ func (m *Manager) containerNeedsRecreate(ctx context.Context, name string, deplo
 }
 
 func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment DeploymentSpec, replica int, name string) error {
+	if err := m.pullImageWithSecrets(ctx, runtime, deployment); err != nil {
+		return err
+	}
 	key := KeyForRuntime(runtime)
 	args := []string{"run", "-d", "--name", name, "--restart", m.config.Docker.RestartPolicy}
 	args = append(args,
@@ -63,7 +69,14 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 		args = append(args, "--cpus", deployment.Resources.CPUs)
 	}
 	if deployment.Resources.Memory != "" {
-		args = append(args, "--memory", deployment.Resources.Memory, "--memory-swap", deployment.Resources.Memory)
+		memorySwap := deployment.Resources.Memory
+		if deployment.Resources.MemorySwap != "" {
+			memorySwap = deployment.Resources.MemorySwap
+		}
+		args = append(args, "--memory", deployment.Resources.Memory, "--memory-swap", memorySwap)
+	}
+	if deployment.Resources.PIDsLimit > 0 {
+		args = append(args, "--pids-limit", strconv.Itoa(deployment.Resources.PIDsLimit))
 	}
 	if healthCommand := m.healthCheckCommand(deployment); healthCommand != "" {
 		args = append(args, "--health-cmd", healthCommand)
@@ -88,6 +101,19 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 	for _, source := range deployment.EnvFrom {
 		if strings.EqualFold(source.Type, "file") && strings.TrimSpace(source.Path) != "" {
 			args = append(args, "--env-file", strings.TrimSpace(source.Path))
+		}
+		if strings.EqualFold(source.Type, "secret") {
+			secret, ok := secretByName(runtime, source.Name)
+			if !ok {
+				return fmt.Errorf("deployment %s envFrom secret %s is not defined", deployment.Name, source.Name)
+			}
+			values, err := secretValues(secret)
+			if err != nil {
+				return err
+			}
+			for key, value := range values {
+				args = append(args, "-e", key+"="+value)
+			}
 		}
 	}
 	for key, value := range deployment.Env {
@@ -129,6 +155,97 @@ func (m *Manager) runContainer(ctx context.Context, runtime Runtime, deployment 
 	}
 	logf(m.log, "AIFAR runtime pod started runtime=%s deployment=%s replica=%d container=%s\n", KeyForRuntime(runtime).String(), deployment.Name, replica, name)
 	return nil
+}
+
+func (m *Manager) pullImageWithSecrets(ctx context.Context, runtime Runtime, deployment DeploymentSpec) error {
+	if len(deployment.ImagePullSecrets) == 0 {
+		return nil
+	}
+	for _, ref := range deployment.ImagePullSecrets {
+		secret, ok := secretByName(runtime, ref.Name)
+		if !ok {
+			return fmt.Errorf("deployment %s imagePullSecret %s is not defined", deployment.Name, ref.Name)
+		}
+		if err := m.pullImageWithSecret(ctx, deployment.Image, secret); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) pullImageWithSecret(ctx context.Context, image string, secret SecretSpec) error {
+	data, err := secretValues(secret)
+	if err != nil {
+		return err
+	}
+	if secret.Type == "dockerconfigjson" {
+		configPath := strings.TrimSpace(data["configPath"])
+		if configPath == "" {
+			return fmt.Errorf("imagePullSecret %s dockerconfigjson requires stringData.configPath", secret.Name)
+		}
+		if _, err := m.docker(ctx, "--config", configPath, "pull", image); err != nil {
+			return fmt.Errorf("pull image %s with docker config secret %s: %w", image, secret.Name, err)
+		}
+		return nil
+	}
+	if secret.Type != "registry-auth" {
+		return fmt.Errorf("imagePullSecret %s type %s is not supported", secret.Name, secret.Type)
+	}
+	registry := strings.TrimSpace(data["server"])
+	if registry == "" {
+		registry = registryForImage(image)
+	}
+	username := strings.TrimSpace(data["username"])
+	password := data["password"]
+	if registry == "" || username == "" || password == "" {
+		return fmt.Errorf("imagePullSecret %s requires stringData.server, username, and password", secret.Name)
+	}
+	configDir, err := os.MkdirTemp("", "aifar-docker-config-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(configDir)
+	if _, err := m.dockerWithInput(ctx, password+"\n", "--config", configDir, "login", registry, "--username", username, "--password-stdin"); err != nil {
+		return fmt.Errorf("docker login registry %s for secret %s: %w", registry, secret.Name, err)
+	}
+	if _, err := m.docker(ctx, "--config", configDir, "pull", image); err != nil {
+		return fmt.Errorf("pull image %s with registry secret %s: %w", image, secret.Name, err)
+	}
+	return nil
+}
+
+func (m *Manager) dockerWithInput(ctx context.Context, input string, args ...string) (CommandResult, error) {
+	if runner, ok := m.runner.(InputCommandRunner); ok {
+		return runner.RunWithInput(ctx, input, m.config.Docker.Command, args...)
+	}
+	return CommandResult{}, errors.New("configured command runner does not support stdin")
+}
+
+func secretValues(secret SecretSpec) (map[string]string, error) {
+	out := map[string]string{}
+	for key, value := range secret.Data {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("secret %s data[%s] must be base64 encoded", secret.Name, key)
+		}
+		out[strings.TrimSpace(key)] = string(decoded)
+	}
+	for key, value := range secret.StringData {
+		out[strings.TrimSpace(key)] = value
+	}
+	delete(out, "")
+	return out, nil
+}
+
+func registryForImage(image string) string {
+	first, _, found := strings.Cut(strings.TrimSpace(image), "/")
+	if !found {
+		return "index.docker.io"
+	}
+	if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
+		return first
+	}
+	return "index.docker.io"
 }
 
 func (m *Manager) waitContainerReady(ctx context.Context, name string) error {
@@ -246,36 +363,40 @@ func sanitizeDockerName(value string) string {
 
 func deploymentSpecHash(deployment DeploymentSpec) string {
 	type hashDeployment struct {
-		Name        string            `json:"name"`
-		Image       string            `json:"image,omitempty"`
-		Selector    map[string]string `json:"selector,omitempty"`
-		Ports       []ContainerPort   `json:"ports,omitempty"`
-		Env         map[string]string `json:"env,omitempty"`
-		EnvFiles    []string          `json:"envFiles,omitempty"`
-		EnvFrom     []EnvFromSource   `json:"envFrom,omitempty"`
-		Volumes     []VolumeMount     `json:"volumes,omitempty"`
-		Resources   ResourceSpec      `json:"resources,omitempty"`
-		HealthCheck HealthCheckSpec   `json:"healthCheck,omitempty"`
-		Entrypoint  []string          `json:"entrypoint,omitempty"`
-		Command     []string          `json:"command,omitempty"`
-		Labels      map[string]string `json:"labels,omitempty"`
-		Revision    string            `json:"revision,omitempty"`
+		Name             string                 `json:"name"`
+		Image            string                 `json:"image,omitempty"`
+		ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty"`
+		Strategy         DeploymentStrategy     `json:"strategy,omitempty"`
+		Selector         map[string]string      `json:"selector,omitempty"`
+		Ports            []ContainerPort        `json:"ports,omitempty"`
+		Env              map[string]string      `json:"env,omitempty"`
+		EnvFiles         []string               `json:"envFiles,omitempty"`
+		EnvFrom          []EnvFromSource        `json:"envFrom,omitempty"`
+		Volumes          []VolumeMount          `json:"volumes,omitempty"`
+		Resources        ResourceSpec           `json:"resources,omitempty"`
+		HealthCheck      HealthCheckSpec        `json:"healthCheck,omitempty"`
+		Entrypoint       []string               `json:"entrypoint,omitempty"`
+		Command          []string               `json:"command,omitempty"`
+		Labels           map[string]string      `json:"labels,omitempty"`
+		Revision         string                 `json:"revision,omitempty"`
 	}
 	data, _ := json.Marshal(hashDeployment{
-		Name:        deployment.Name,
-		Image:       deployment.Image,
-		Selector:    deployment.Selector,
-		Ports:       deployment.Ports,
-		Env:         deployment.Env,
-		EnvFiles:    deployment.EnvFiles,
-		EnvFrom:     deployment.EnvFrom,
-		Volumes:     deployment.Volumes,
-		Resources:   deployment.Resources,
-		HealthCheck: deployment.HealthCheck,
-		Entrypoint:  deployment.Entrypoint,
-		Command:     deployment.Command,
-		Labels:      deployment.Labels,
-		Revision:    deployment.Revision,
+		Name:             deployment.Name,
+		Image:            deployment.Image,
+		ImagePullSecrets: deployment.ImagePullSecrets,
+		Strategy:         deployment.Strategy,
+		Selector:         deployment.Selector,
+		Ports:            deployment.Ports,
+		Env:              deployment.Env,
+		EnvFiles:         deployment.EnvFiles,
+		EnvFrom:          deployment.EnvFrom,
+		Volumes:          deployment.Volumes,
+		Resources:        deployment.Resources,
+		HealthCheck:      deployment.HealthCheck,
+		Entrypoint:       deployment.Entrypoint,
+		Command:          deployment.Command,
+		Labels:           deployment.Labels,
+		Revision:         deployment.Revision,
 	})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

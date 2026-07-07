@@ -5,12 +5,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+type RuntimeStateStore interface {
+	Root() string
+	Ensure() error
+	SaveRuntime(runtime Runtime) error
+	ReadRuntime(namespace, name string) (Runtime, error)
+	LoadAll() ([]Runtime, error)
+	SaveStatus(runtime Runtime, status RuntimeStatus) error
+	ReadStatus(namespace, name string) (RuntimeStatus, error)
+	AppendEvent(namespace, name, eventType, reason, message string) error
+	ReadEvents(namespace, name string, tail int) ([]RuntimeEvent, error)
+	DeleteRuntime(namespace, name string) error
+	BackupTo(writer io.Writer) error
+	RestoreFrom(reader io.Reader) error
+}
+
+type StateBackup struct {
+	Version   string                    `json:"version"`
+	CreatedAt string                    `json:"createdAt"`
+	Runtimes  []Runtime                 `json:"runtimes"`
+	Statuses  map[string]RuntimeStatus  `json:"statuses,omitempty"`
+	Events    map[string][]RuntimeEvent `json:"events,omitempty"`
+}
 
 type StateStore struct {
 	root string
@@ -202,6 +226,97 @@ func (s *StateStore) DeleteRuntime(namespace, name string) error {
 	}
 	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *StateStore) BackupTo(writer io.Writer) error {
+	if writer == nil {
+		return errors.New("backup writer is required")
+	}
+	runtimes, err := s.LoadAll()
+	if err != nil {
+		return err
+	}
+	backup := StateBackup{
+		Version:   RuntimeVersion,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Runtimes:  runtimes,
+		Statuses:  map[string]RuntimeStatus{},
+		Events:    map[string][]RuntimeEvent{},
+	}
+	for _, runtime := range runtimes {
+		key := KeyForRuntime(runtime)
+		if status, err := s.ReadStatus(key.Namespace, key.Name); err == nil {
+			backup.Statuses[key.String()] = status
+		}
+		if events, err := s.ReadEvents(key.Namespace, key.Name, 0); err == nil && len(events) > 0 {
+			backup.Events[key.String()] = events
+		}
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(backup)
+}
+
+func (s *StateStore) RestoreFrom(reader io.Reader) error {
+	if reader == nil {
+		return errors.New("restore reader is required")
+	}
+	var backup StateBackup
+	if err := json.NewDecoder(reader).Decode(&backup); err != nil {
+		return err
+	}
+	if backup.Version == "" || len(backup.Runtimes) == 0 {
+		return errors.New("invalid AIFAR Runtime backup")
+	}
+	for _, runtime := range backup.Runtimes {
+		runtime = NormalizeRuntime(runtime)
+		key := KeyForRuntime(runtime)
+		if err := ValidateRuntime(runtime); err != nil {
+			return fmt.Errorf("restore runtime %s: %w", key.String(), err)
+		}
+		if err := s.SaveRuntime(runtime); err != nil {
+			return err
+		}
+		if status, ok := backup.Statuses[key.String()]; ok {
+			if err := s.SaveStatus(runtime, status); err != nil {
+				return err
+			}
+		}
+		if events := backup.Events[key.String()]; len(events) > 0 {
+			if err := s.writeEvents(key.Namespace, key.Name, events); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *StateStore) writeEvents(namespace, name string, events []RuntimeEvent) error {
+	key := runtimeKey(namespace, name)
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	path := s.eventsPath(key.Namespace, key.Name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for _, event := range events {
+		event.Namespace = key.Namespace
+		event.Name = key.Name
+		data, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(append(data, '\n')); err != nil {
 			return err
 		}
 	}

@@ -4,7 +4,12 @@ api:
   shutdownTimeout: 30s
 
 state:
+  backend: file
   dir: /var/lib/aifar-runtime
+  etcd:
+    endpoints: []
+    prefix: /aifar-runtime
+    dialTimeout: 5s
 
 docker:
   command: docker
@@ -32,6 +37,9 @@ security:
   bearerTokenFile: ""
   tlsCertFile: ""
   tlsKeyFile: ""
+  rbac:
+    enabled: false
+    tokens: []
 
 observability:
   metricsEnabled: true

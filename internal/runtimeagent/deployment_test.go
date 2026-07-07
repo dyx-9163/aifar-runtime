@@ -48,3 +48,38 @@ func TestManagerApplyReturnsDockerListErrorsWhenCleaningReplicas(t *testing.T) {
 		t.Fatalf("expected docker ps cleanup error, got %v", err)
 	}
 }
+
+func TestManagerRollingUpdateSurgesBeforeRemovingDriftedContainer(t *testing.T) {
+	servicePort := freePort(t)
+	ingressPort := freePort(t)
+	runner := newFakeDockerRunner()
+	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: runner})
+	runtime := testRuntime(ingressPort, servicePort)
+	name := containerNameForDeployment(runtime, runtime.Spec.Deployments[0], 1)
+	runner.addContainer(name, map[string]string{
+		"aifar.runtime/managed":    "true",
+		"aifar.runtime/namespace":  "prod",
+		"aifar.runtime/name":       "demo",
+		"aifar.runtime/deployment": "api",
+		"aifar.runtime/replica":    "1",
+		"aifar.runtime/revision":   "rev-1",
+		"aifar.runtime/spec-hash":  "old",
+	})
+
+	if err := manager.Apply(context.Background(), runtime); err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Join(runner.snapshotCalls(), "\n")
+	runIndex := strings.Index(calls, "docker run ")
+	rmIndex := strings.Index(calls, "docker rm -f "+name)
+	renameIndex := strings.Index(calls, "docker rename "+name+"-surge-g")
+	if runIndex < 0 || rmIndex < 0 || renameIndex < 0 {
+		t.Fatalf("expected run, rm, and rename calls, got:\n%s", calls)
+	}
+	if !(runIndex < rmIndex && rmIndex < renameIndex) {
+		t.Fatalf("expected surge run before rm before rename, got:\n%s", calls)
+	}
+	if err := manager.Remove(context.Background(), "prod", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}

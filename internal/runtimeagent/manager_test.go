@@ -151,6 +151,14 @@ func (r *fakeDockerRunner) Run(ctx context.Context, name string, args ...string)
 	if name != "docker" || len(args) == 0 {
 		return CommandResult{Stdout: "ok\n"}, nil
 	}
+	if args[0] == "--config" {
+		if len(args) >= 4 && args[2] == "pull" {
+			return CommandResult{Stdout: "pulled\n"}, nil
+		}
+		if len(args) >= 4 && args[2] == "login" {
+			return CommandResult{Stdout: "login succeeded\n"}, nil
+		}
+	}
 	switch args[0] {
 	case "info", "network":
 		return CommandResult{Stdout: "ok\n"}, nil
@@ -165,9 +173,21 @@ func (r *fakeDockerRunner) Run(ctx context.Context, name string, args ...string)
 			delete(r.containers, args[2])
 		}
 		return CommandResult{Stdout: "removed\n"}, nil
+	case "rename":
+		if len(args) >= 3 {
+			if container, ok := r.containers[args[1]]; ok {
+				delete(r.containers, args[1])
+				r.containers[args[2]] = container
+			}
+		}
+		return CommandResult{Stdout: "renamed\n"}, nil
 	default:
 		return CommandResult{Stdout: "ok\n"}, nil
 	}
+}
+
+func (r *fakeDockerRunner) RunWithInput(ctx context.Context, input string, name string, args ...string) (CommandResult, error) {
+	return r.Run(ctx, name, args...)
 }
 
 func (r *fakeDockerRunner) inspect(args []string) (CommandResult, error) {

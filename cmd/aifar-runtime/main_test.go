@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +80,33 @@ func TestRuntimeHandlerRequiresBearerTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandlerAppliesLightweightRBAC(t *testing.T) {
+	handler := newRuntimeHandlerWithOptions(
+		runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir()}),
+		func(context.Context) error { return nil },
+		runtimeHandlerOptions{AuthPolicies: []accessPolicy{
+			{Name: "viewer", Role: "viewer", Token: "view"},
+			{Name: "operator", Role: "operator", Token: "operate"},
+		}, MetricsEnabled: true, Build: currentBuildInfo()},
+	)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set("Authorization", "Bearer view")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("viewer status code = %d", recorder.Code)
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/apis/aifar.io/v1/namespaces/prod/runtimes/demo", nil)
+	req.Header.Set("Authorization", "Bearer operate")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("operator delete code = %d", recorder.Code)
+	}
+}
+
 func TestRuntimeHandlerServesMetricsAndVersion(t *testing.T) {
 	handler := newRuntimeHandlerWithOptions(
 		runtimeagent.NewManager(runtimeagent.ManagerOptions{StateDir: t.TempDir()}),
@@ -104,6 +133,49 @@ func TestAPIBaseURLAcceptsExplicitScheme(t *testing.T) {
 	}
 	if got := apiBaseURL("127.0.0.1:18081"); got != "http://127.0.0.1:18081" {
 		t.Fatalf("unexpected default base URL: %s", got)
+	}
+}
+
+func TestBackupAndRestoreStateCommands(t *testing.T) {
+	dir := t.TempDir()
+	config := runtimeagent.DefaultRuntimeConfig()
+	config.State.Dir = filepath.Join(dir, "state")
+	source := runtimeagent.NewStateStore(config.State.Dir)
+	runtime := runtimeagent.NormalizeRuntime(runtimeagent.Runtime{
+		APIVersion: runtimeagent.DefaultAPIVersion,
+		Kind:       runtimeagent.DefaultKind,
+		Metadata:   runtimeagent.ObjectMeta{Name: "demo", Namespace: "prod"},
+		Spec: runtimeagent.RuntimeSpec{
+			Deployments: []runtimeagent.DeploymentSpec{{
+				Name:     "api",
+				Image:    "demo-api:1",
+				Selector: map[string]string{"app": "api"},
+				Ports:    []runtimeagent.ContainerPort{{Name: "http", ContainerPort: 9000}},
+			}},
+			Services: []runtimeagent.ServiceSpec{{
+				Name:       "api",
+				Selector:   map[string]string{"app": "api"},
+				Port:       9000,
+				TargetPort: runtimeagent.FromString("http"),
+				ListenPort: 19000,
+			}},
+		},
+	})
+	if err := source.SaveRuntime(runtime); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(dir, "backup.json")
+	if err := backupState(config, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(config.State.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreState(config, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeagent.NewStateStore(config.State.Dir).ReadRuntime("prod", "demo"); err != nil {
+		t.Fatal(err)
 	}
 }
 

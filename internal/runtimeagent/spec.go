@@ -1,6 +1,7 @@
 package runtimeagent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,29 +39,53 @@ type ObjectMeta struct {
 
 type RuntimeSpec struct {
 	Network     string           `json:"network,omitempty" yaml:"network,omitempty"`
+	Secrets     []SecretSpec     `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	Deployments []DeploymentSpec `json:"deployments,omitempty" yaml:"deployments,omitempty"`
 	Services    []ServiceSpec    `json:"services,omitempty" yaml:"services,omitempty"`
 	Ingress     []IngressSpec    `json:"ingress,omitempty" yaml:"ingress,omitempty"`
 }
 
 type DeploymentSpec struct {
-	Name        string            `json:"name,omitempty" yaml:"name,omitempty"`
-	ServiceName string            `json:"serviceName,omitempty" yaml:"serviceName,omitempty"`
-	Image       string            `json:"image,omitempty" yaml:"image,omitempty"`
-	Replicas    *int              `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	Selector    map[string]string `json:"selector,omitempty" yaml:"selector,omitempty"`
-	Ports       []ContainerPort   `json:"ports,omitempty" yaml:"ports,omitempty"`
-	Env         map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	EnvFiles    []string          `json:"envFiles,omitempty" yaml:"envFiles,omitempty"`
-	EnvFrom     []EnvFromSource   `json:"envFrom,omitempty" yaml:"envFrom,omitempty"`
-	Volumes     []VolumeMount     `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Resources   ResourceSpec      `json:"resources,omitempty" yaml:"resources,omitempty"`
-	HealthCheck HealthCheckSpec   `json:"healthCheck,omitempty" yaml:"healthCheck,omitempty"`
-	Entrypoint  []string          `json:"entrypoint,omitempty" yaml:"entrypoint,omitempty"`
-	Command     []string          `json:"command,omitempty" yaml:"command,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Revision    string            `json:"revision,omitempty" yaml:"revision,omitempty"`
-	PodRevision string            `json:"podRevision,omitempty" yaml:"podRevision,omitempty"`
+	Name             string                 `json:"name,omitempty" yaml:"name,omitempty"`
+	ServiceName      string                 `json:"serviceName,omitempty" yaml:"serviceName,omitempty"`
+	Image            string                 `json:"image,omitempty" yaml:"image,omitempty"`
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty" yaml:"imagePullSecrets,omitempty"`
+	Replicas         *int                   `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	Strategy         DeploymentStrategy     `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	Selector         map[string]string      `json:"selector,omitempty" yaml:"selector,omitempty"`
+	Ports            []ContainerPort        `json:"ports,omitempty" yaml:"ports,omitempty"`
+	Env              map[string]string      `json:"env,omitempty" yaml:"env,omitempty"`
+	EnvFiles         []string               `json:"envFiles,omitempty" yaml:"envFiles,omitempty"`
+	EnvFrom          []EnvFromSource        `json:"envFrom,omitempty" yaml:"envFrom,omitempty"`
+	Volumes          []VolumeMount          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	Resources        ResourceSpec           `json:"resources,omitempty" yaml:"resources,omitempty"`
+	HealthCheck      HealthCheckSpec        `json:"healthCheck,omitempty" yaml:"healthCheck,omitempty"`
+	Entrypoint       []string               `json:"entrypoint,omitempty" yaml:"entrypoint,omitempty"`
+	Command          []string               `json:"command,omitempty" yaml:"command,omitempty"`
+	Labels           map[string]string      `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Revision         string                 `json:"revision,omitempty" yaml:"revision,omitempty"`
+	PodRevision      string                 `json:"podRevision,omitempty" yaml:"podRevision,omitempty"`
+}
+
+type SecretSpec struct {
+	Name       string            `json:"name,omitempty" yaml:"name,omitempty"`
+	Type       string            `json:"type,omitempty" yaml:"type,omitempty"`
+	StringData map[string]string `json:"stringData,omitempty" yaml:"stringData,omitempty"`
+	Data       map[string]string `json:"data,omitempty" yaml:"data,omitempty"`
+}
+
+type LocalObjectReference struct {
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+}
+
+type DeploymentStrategy struct {
+	Type          string                 `json:"type,omitempty" yaml:"type,omitempty"`
+	RollingUpdate *RollingUpdateStrategy `json:"rollingUpdate,omitempty" yaml:"rollingUpdate,omitempty"`
+}
+
+type RollingUpdateStrategy struct {
+	MaxUnavailable int `json:"maxUnavailable,omitempty" yaml:"maxUnavailable,omitempty"`
+	MaxSurge       int `json:"maxSurge,omitempty" yaml:"maxSurge,omitempty"`
 }
 
 type ContainerPort struct {
@@ -80,8 +106,10 @@ type VolumeMount struct {
 }
 
 type ResourceSpec struct {
-	CPUs   string `json:"cpus,omitempty" yaml:"cpus,omitempty"`
-	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	CPUs       string `json:"cpus,omitempty" yaml:"cpus,omitempty"`
+	Memory     string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	MemorySwap string `json:"memorySwap,omitempty" yaml:"memorySwap,omitempty"`
+	PIDsLimit  int    `json:"pidsLimit,omitempty" yaml:"pidsLimit,omitempty"`
 }
 
 type HealthCheckSpec struct {
@@ -296,6 +324,13 @@ func NormalizeRuntime(runtime Runtime) Runtime {
 	if strings.TrimSpace(runtime.Spec.Network) == "" {
 		runtime.Spec.Network = DefaultNetwork
 	}
+	for i := range runtime.Spec.Secrets {
+		secret := &runtime.Spec.Secrets[i]
+		secret.Name = strings.TrimSpace(secret.Name)
+		secret.Type = strings.ToLower(defaultSecretType(secret.Type))
+		trimStringMap(secret.StringData)
+		trimStringMap(secret.Data)
+	}
 	for i := range runtime.Spec.Deployments {
 		deployment := &runtime.Spec.Deployments[i]
 		deployment.Name = strings.TrimSpace(deployment.Name)
@@ -314,6 +349,16 @@ func NormalizeRuntime(runtime Runtime) Runtime {
 		if deployment.Replicas == nil {
 			value := 1
 			deployment.Replicas = &value
+		}
+		deployment.Strategy.Type = strings.ToLower(strings.TrimSpace(deployment.Strategy.Type))
+		if deployment.Strategy.Type == "" {
+			deployment.Strategy.Type = "rollingupdate"
+		}
+		if deployment.Strategy.Type == "rollingupdate" && deployment.Strategy.RollingUpdate == nil {
+			deployment.Strategy.RollingUpdate = &RollingUpdateStrategy{MaxUnavailable: 0, MaxSurge: 1}
+		}
+		for j := range deployment.ImagePullSecrets {
+			deployment.ImagePullSecrets[j].Name = strings.TrimSpace(deployment.ImagePullSecrets[j].Name)
 		}
 		if deployment.Selector == nil {
 			deployment.Selector = map[string]string{}
@@ -434,6 +479,29 @@ func ValidateRuntime(runtime Runtime) error {
 	if len(runtime.Spec.Services) == 0 {
 		return errors.New("spec.services is required")
 	}
+	secrets := map[string]SecretSpec{}
+	for _, secret := range runtime.Spec.Secrets {
+		if !validDNSLabel(secret.Name) {
+			return fmt.Errorf("secret name %q must use lowercase letters, digits, and '-'", secret.Name)
+		}
+		if _, exists := secrets[secret.Name]; exists {
+			return fmt.Errorf("duplicate secret %q", secret.Name)
+		}
+		switch secret.Type {
+		case "opaque", "registry-auth", "dockerconfigjson":
+		default:
+			return fmt.Errorf("secret %s type %q is not supported", secret.Name, secret.Type)
+		}
+		if len(secret.StringData) == 0 && len(secret.Data) == 0 {
+			return fmt.Errorf("secret %s data is required", secret.Name)
+		}
+		for key, value := range secret.Data {
+			if _, err := base64.StdEncoding.DecodeString(value); err != nil {
+				return fmt.Errorf("secret %s data[%s] must be base64 encoded", secret.Name, key)
+			}
+		}
+		secrets[secret.Name] = secret
+	}
 	deployments := map[string]DeploymentSpec{}
 	for _, deployment := range runtime.Spec.Deployments {
 		if !validDNSLabel(deployment.Name) {
@@ -447,6 +515,52 @@ func ValidateRuntime(runtime Runtime) error {
 		}
 		if replicas := deploymentReplicas(deployment); replicas < 0 {
 			return fmt.Errorf("deployment %s replicas must be >= 0", deployment.Name)
+		}
+		switch deployment.Strategy.Type {
+		case "rollingupdate", "recreate":
+		default:
+			return fmt.Errorf("deployment %s strategy.type %q is not supported", deployment.Name, deployment.Strategy.Type)
+		}
+		if deployment.Strategy.RollingUpdate != nil {
+			if deployment.Strategy.RollingUpdate.MaxUnavailable < 0 || deployment.Strategy.RollingUpdate.MaxSurge < 0 {
+				return fmt.Errorf("deployment %s rollingUpdate maxUnavailable and maxSurge must be >= 0", deployment.Name)
+			}
+			if deployment.Strategy.Type == "rollingupdate" && deployment.Strategy.RollingUpdate.MaxUnavailable == 0 && deployment.Strategy.RollingUpdate.MaxSurge == 0 {
+				return fmt.Errorf("deployment %s rollingUpdate requires maxSurge or maxUnavailable", deployment.Name)
+			}
+		}
+		for _, ref := range deployment.ImagePullSecrets {
+			if ref.Name == "" {
+				return fmt.Errorf("deployment %s imagePullSecrets name is required", deployment.Name)
+			}
+			secret, ok := secrets[ref.Name]
+			if !ok {
+				return fmt.Errorf("deployment %s imagePullSecret %s is not defined", deployment.Name, ref.Name)
+			}
+			if secret.Type != "registry-auth" && secret.Type != "dockerconfigjson" {
+				return fmt.Errorf("deployment %s imagePullSecret %s must be registry-auth or dockerconfigjson", deployment.Name, ref.Name)
+			}
+		}
+		for _, source := range deployment.EnvFrom {
+			if strings.EqualFold(source.Type, "secret") {
+				if _, ok := secrets[source.Name]; !ok {
+					return fmt.Errorf("deployment %s envFrom secret %s is not defined", deployment.Name, source.Name)
+				}
+			}
+		}
+		if err := validateResourceSpec(deployment.Name, deployment.Resources); err != nil {
+			return err
+		}
+		if err := validateHealthCheckSpec(deployment.Name, deployment.HealthCheck); err != nil {
+			return err
+		}
+		for _, volume := range deployment.Volumes {
+			if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
+				return fmt.Errorf("deployment %s volume source and target are required", deployment.Name)
+			}
+			if !strings.HasPrefix(volume.Target, "/") {
+				return fmt.Errorf("deployment %s volume target %q must be absolute", deployment.Name, volume.Target)
+			}
 		}
 		for _, port := range deployment.Ports {
 			if strings.TrimSpace(port.Name) != "" && !validPortName(port.Name) {
@@ -524,11 +638,29 @@ func ValidateRuntime(runtime Runtime) error {
 	return nil
 }
 
+func defaultSecretType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "opaque"
+	}
+	return value
+}
+
 func deploymentReplicas(deployment DeploymentSpec) int {
 	if deployment.Replicas == nil {
 		return 1
 	}
 	return *deployment.Replicas
+}
+
+func secretByName(runtime Runtime, name string) (SecretSpec, bool) {
+	name = strings.TrimSpace(name)
+	for _, secret := range runtime.Spec.Secrets {
+		if secret.Name == name {
+			return secret, true
+		}
+	}
+	return SecretSpec{}, false
 }
 
 func runtimeKey(namespace, name string) RuntimeKey {
@@ -629,6 +761,43 @@ func validPortName(value string) bool {
 }
 
 var dnsLabelRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+var memoryLimitRE = regexp.MustCompile(`^[1-9][0-9]*(b|k|m|g|t|kb|mb|gb|tb|ki|mi|gi|ti|kib|mib|gib|tib)?$`)
+var cpuLimitRE = regexp.MustCompile(`^([1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$`)
+
+func validateResourceSpec(deployment string, resources ResourceSpec) error {
+	if resources.CPUs != "" && !cpuLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.CPUs))) {
+		return fmt.Errorf("deployment %s resources.cpus %q must be a positive decimal", deployment, resources.CPUs)
+	}
+	if resources.Memory != "" && !memoryLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.Memory))) {
+		return fmt.Errorf("deployment %s resources.memory %q must be a positive Docker memory value", deployment, resources.Memory)
+	}
+	if resources.MemorySwap != "" && !memoryLimitRE.MatchString(strings.ToLower(strings.TrimSpace(resources.MemorySwap))) {
+		return fmt.Errorf("deployment %s resources.memorySwap %q must be a positive Docker memory value", deployment, resources.MemorySwap)
+	}
+	if resources.PIDsLimit < 0 {
+		return fmt.Errorf("deployment %s resources.pidsLimit must be >= 0", deployment)
+	}
+	return nil
+}
+
+func validateHealthCheckSpec(deployment string, health HealthCheckSpec) error {
+	for field, value := range map[string]string{
+		"interval":    health.Interval,
+		"timeout":     health.Timeout,
+		"startPeriod": health.StartPeriod,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(value); err != nil {
+			return fmt.Errorf("deployment %s healthCheck.%s %q must be a valid duration", deployment, field, value)
+		}
+	}
+	if health.Retries < 0 {
+		return fmt.Errorf("deployment %s healthCheck.retries must be >= 0", deployment)
+	}
+	return nil
+}
 
 func trimStringMap(values map[string]string) {
 	for key, value := range values {

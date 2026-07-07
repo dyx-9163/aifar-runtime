@@ -43,6 +43,8 @@ make release VERSION=0.1.0
 
 ```powershell
 aifar-runtime serve --listen 127.0.0.1:18081 --state-dir /var/lib/aifar-runtime
+aifar-runtime backup --out backup.json
+aifar-runtime restore --in backup.json
 aifar-runtime validate -f rendered-runtime.yaml
 aifar-runtime apply -f rendered-runtime.yaml
 aifar-runtime status --namespace prod --name demo
@@ -85,10 +87,27 @@ metadata:
   namespace: prod
 spec:
   network: aifar-runtime
+  secrets:
+    - name: regcred
+      type: registry-auth
+      stringData:
+        server: registry.local
+        username: robot
+        password: rendered-password
   deployments:
     - name: api
       image: registry.local/demo-api:1.0.0
+      imagePullSecrets:
+        - name: regcred
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 1
+          maxUnavailable: 0
       replicas: 2
+      resources:
+        cpus: "0.5"
+        memory: 256Mi
       ports:
         - name: http
           containerPort: 9000

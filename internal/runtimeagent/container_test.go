@@ -71,6 +71,52 @@ func TestManagerRunContainerSplitsEntrypointExecutableFromArgs(t *testing.T) {
 	}
 }
 
+func TestManagerRunContainerUsesRegistrySecretAndSecretEnv(t *testing.T) {
+	servicePort := freePort(t)
+	ingressPort := freePort(t)
+	runner := newFakeDockerRunner()
+	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: runner})
+	runtime := testRuntime(ingressPort, servicePort)
+	runtime.Spec.Secrets = []SecretSpec{
+		{
+			Name: "regcred",
+			Type: "registry-auth",
+			StringData: map[string]string{
+				"server":   "registry.local",
+				"username": "robot",
+				"password": "reg-password",
+			},
+		},
+		{
+			Name:       "app-env",
+			Type:       "opaque",
+			StringData: map[string]string{"API_KEY": "top-secret"},
+		},
+	}
+	runtime.Spec.Deployments[0].Image = "registry.local/demo-api:1"
+	runtime.Spec.Deployments[0].ImagePullSecrets = []LocalObjectReference{{Name: "regcred"}}
+	runtime.Spec.Deployments[0].EnvFrom = []EnvFromSource{{Type: "secret", Name: "app-env"}}
+	runtime = NormalizeRuntime(runtime)
+
+	if err := manager.Apply(context.Background(), runtime); err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Join(runner.snapshotCalls(), "\n")
+	if !strings.Contains(calls, "docker --config") || !strings.Contains(calls, "login registry.local --username robot --password-stdin") {
+		t.Fatalf("expected registry login through docker --config, got:\n%s", calls)
+	}
+	if strings.Contains(calls, "reg-password") {
+		t.Fatalf("registry password leaked into docker command calls:\n%s", calls)
+	}
+	runCall := runner.firstCallContaining("docker run ")
+	if !strings.Contains(runCall, "-e API_KEY=top-secret") {
+		t.Fatalf("expected secret env injection, got:\n%s", runCall)
+	}
+	if err := manager.Remove(context.Background(), "prod", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerContainerReadyDiagnosticsIncludesInspectAndLogs(t *testing.T) {
 	runner := &diagnosticRunner{}
 	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: runner})

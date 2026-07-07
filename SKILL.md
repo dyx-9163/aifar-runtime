@@ -26,6 +26,8 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Use `RuntimeProvider`-style seams through `CommandRunner` or fakes for tests. Do not call real Docker or real registries from tests.
 - Keep HTTP handlers and CLI commands as adapters around `runtimeagent` behavior.
 - Preserve optional API security and observability as first-class control-plane features for private deployments.
+- Keep `state.backend` abstracted. `file` is the only implemented backend today; `etcd` is reserved for the future clustered control plane and must not silently fall back to local file state.
+- Treat Runtime `secrets` as rendered private-deployment material. Do not log registry passwords or secret values except where Docker requires env injection.
 
 ## GitHub Publishing
 

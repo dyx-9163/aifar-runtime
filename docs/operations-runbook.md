@@ -26,6 +26,8 @@ sudo sh -c 'umask 077 && printf "%s\n" "<replace-with-random-token>" > /etc/aifa
 sudo chgrp aifar-runtime /etc/aifar-runtime/secrets/api-token
 ```
 
+For multi-principal access, enable `security.rbac.enabled` and configure token files with one of these roles: `admin`, `operator`, `viewer`.
+
 ## Daily Checks
 
 ```bash
@@ -35,6 +37,18 @@ aifar-runtime health --config /etc/aifar-runtime/config.yaml
 aifar-runtime status --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runtime/secrets/api-token)"
 curl -fsS -H "Authorization: Bearer $(sudo cat /etc/aifar-runtime/secrets/api-token)" http://127.0.0.1:18081/metrics
 ```
+
+## Backup And Restore
+
+```bash
+sudo install -m 0750 -o aifar-runtime -g aifar-runtime -d /var/backups/aifar-runtime
+sudo -u aifar-runtime aifar-runtime backup --config /etc/aifar-runtime/config.yaml --out /var/backups/aifar-runtime/state-$(date -u +%Y%m%dT%H%M%SZ).json
+sudo systemctl stop aifar-runtime
+sudo -u aifar-runtime aifar-runtime restore --config /etc/aifar-runtime/config.yaml --in /var/backups/aifar-runtime/state.json
+sudo systemctl start aifar-runtime
+```
+
+Restore writes desired state, status, and events back into the file state backend. It does not restore container images or external volumes.
 
 ## Upgrade
 
@@ -63,6 +77,7 @@ sudo systemctl restart aifar-runtime
 | Service or Ingress port is unavailable | Check whether another process owns the listen port with `ss -ltnp`. |
 | Runtime status is `Failed` | Inspect `aifar-runtime events --namespace <ns> --name <name>` and container logs. |
 | State looks stale | Confirm `state.dir` ownership and restart the service to trigger load plus resync. |
+| Private image pull fails | Confirm the referenced `imagePullSecrets` secret and registry credentials, then inspect Docker auth errors in the event stream/logs. |
 
 ## Release Package
 

@@ -35,6 +35,12 @@ type buildInfo struct {
 	RuntimeVersion string `json:"runtimeVersion"`
 }
 
+type accessPolicy struct {
+	Name  string
+	Role  string
+	Token string
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -64,6 +70,26 @@ func run(command string, args []string) error {
 		}
 		fmt.Println(`{"status":"ok"}`)
 		return nil
+	case "backup":
+		cmd := flag.NewFlagSet("backup", flag.ExitOnError)
+		configPath := cmd.String("config", "", "path to runtime config yaml")
+		outPath := cmd.String("out", "", "backup output path, defaults to stdout")
+		_ = cmd.Parse(args)
+		config, err := runtimeagent.LoadRuntimeConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		return backupState(config, *outPath)
+	case "restore":
+		cmd := flag.NewFlagSet("restore", flag.ExitOnError)
+		configPath := cmd.String("config", "", "path to runtime config yaml")
+		inPath := cmd.String("in", "", "backup input path, defaults to stdin")
+		_ = cmd.Parse(args)
+		config, err := runtimeagent.LoadRuntimeConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		return restoreState(config, *inPath)
 	case "validate":
 		cmd := flag.NewFlagSet("validate", flag.ExitOnError)
 		file := cmd.String("f", "", "path to rendered-runtime.yaml")
@@ -204,11 +230,49 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: aifar-runtime serve [--config /etc/aifar-runtime/config.yaml] [--listen 127.0.0.1:18081] [--state-dir /var/lib/aifar-runtime]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime version")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime health [--config /etc/aifar-runtime/config.yaml]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime backup [--config /etc/aifar-runtime/config.yaml] [--out backup.json]")
+	fmt.Fprintln(os.Stderr, "       aifar-runtime restore [--config /etc/aifar-runtime/config.yaml] [--in backup.json]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime validate -f rendered-runtime.yaml")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime apply -f rendered-runtime.yaml [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime status [--namespace default --name demo] [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime events --namespace default --name demo [--tail 100] [--addr 127.0.0.1:18081] [--token ...]")
 	fmt.Fprintln(os.Stderr, "       aifar-runtime delete --namespace default --name demo [--addr 127.0.0.1:18081] [--token ...]")
+}
+
+func backupState(config runtimeagent.RuntimeConfig, outPath string) error {
+	config = runtimeagent.NormalizeRuntimeConfig(config)
+	if config.State.Backend != "file" {
+		return fmt.Errorf("backup is only supported for state.backend=file, got %s", config.State.Backend)
+	}
+	store := runtimeagent.NewStateStore(config.State.Dir)
+	outPath = strings.TrimSpace(outPath)
+	if outPath == "" || outPath == "-" {
+		return store.BackupTo(os.Stdout)
+	}
+	file, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return store.BackupTo(file)
+}
+
+func restoreState(config runtimeagent.RuntimeConfig, inPath string) error {
+	config = runtimeagent.NormalizeRuntimeConfig(config)
+	if config.State.Backend != "file" {
+		return fmt.Errorf("restore is only supported for state.backend=file, got %s", config.State.Backend)
+	}
+	store := runtimeagent.NewStateStore(config.State.Dir)
+	inPath = strings.TrimSpace(inPath)
+	if inPath == "" || inPath == "-" {
+		return store.RestoreFrom(os.Stdin)
+	}
+	file, err := os.Open(inPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return store.RestoreFrom(file)
 }
 
 func readRuntimeFile(path string) (runtimeagent.Runtime, error) {
@@ -257,7 +321,7 @@ func serve(config runtimeagent.RuntimeConfig) error {
 	server := &http.Server{
 		Addr: config.API.Listen,
 		Handler: newRuntimeHandlerWithOptions(manager, manager.Ready, runtimeHandlerOptions{
-			AuthToken:      config.Security.BearerToken,
+			AuthPolicies:   accessPoliciesForConfig(config),
 			MetricsEnabled: config.Observability.MetricsEnabled,
 			Build:          currentBuildInfo(),
 		}),
@@ -303,6 +367,7 @@ func serve(config runtimeagent.RuntimeConfig) error {
 
 type runtimeHandlerOptions struct {
 	AuthToken      string
+	AuthPolicies   []accessPolicy
 	MetricsEnabled bool
 	Build          buildInfo
 }
@@ -408,7 +473,7 @@ func newRuntimeHandlerWithOptions(manager *runtimeagent.Manager, readyCheck func
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	})
-	return withAPISecurity(mux, options.AuthToken)
+	return withAPISecurity(mux, accessPoliciesForOptions(options))
 }
 
 func handleRuntimeAPI(manager *runtimeagent.Manager, w http.ResponseWriter, r *http.Request) {
@@ -635,9 +700,33 @@ func currentBuildInfo() buildInfo {
 	}
 }
 
-func withAPISecurity(next http.Handler, token string) http.Handler {
-	token = strings.TrimSpace(token)
-	if token == "" {
+func accessPoliciesForConfig(config runtimeagent.RuntimeConfig) []accessPolicy {
+	policies := []accessPolicy{}
+	if config.Security.RBAC.Enabled {
+		for _, token := range config.Security.RBAC.Tokens {
+			if strings.TrimSpace(token.Token) == "" {
+				continue
+			}
+			policies = append(policies, accessPolicy{Name: token.Name, Role: token.Role, Token: token.Token})
+		}
+		return policies
+	}
+	if strings.TrimSpace(config.Security.BearerToken) != "" {
+		return []accessPolicy{{Name: "default-admin", Role: "admin", Token: config.Security.BearerToken}}
+	}
+	return nil
+}
+
+func accessPoliciesForOptions(options runtimeHandlerOptions) []accessPolicy {
+	policies := append([]accessPolicy(nil), options.AuthPolicies...)
+	if len(policies) == 0 && strings.TrimSpace(options.AuthToken) != "" {
+		policies = append(policies, accessPolicy{Name: "default-admin", Role: "admin", Token: options.AuthToken})
+	}
+	return policies
+}
+
+func withAPISecurity(next http.Handler, policies []accessPolicy) http.Handler {
+	if len(policies) == 0 {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -645,15 +734,46 @@ func withAPISecurity(next http.Handler, token string) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		want := "Bearer " + token
-		got := strings.TrimSpace(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		policy, ok := matchAccessPolicy(policies, r.Header.Get("Authorization"))
+		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="aifar-runtime"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if !policyAllowsRequest(policy, r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func matchAccessPolicy(policies []accessPolicy, authorization string) (accessPolicy, bool) {
+	got := strings.TrimSpace(authorization)
+	for _, policy := range policies {
+		if policy.Token == "" {
+			continue
+		}
+		want := "Bearer " + policy.Token
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+			return policy, true
+		}
+	}
+	return accessPolicy{}, false
+}
+
+func policyAllowsRequest(policy accessPolicy, r *http.Request) bool {
+	role := strings.ToLower(strings.TrimSpace(policy.Role))
+	switch role {
+	case "admin":
+		return true
+	case "operator":
+		return r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodPut
+	case "viewer":
+		return r.Method == http.MethodGet
+	default:
+		return false
+	}
 }
 
 func isPublicProbePath(path string) bool {

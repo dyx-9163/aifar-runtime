@@ -101,6 +101,34 @@ func TestLoadRuntimeConfigReadsBearerTokenFile(t *testing.T) {
 	}
 }
 
+func TestLoadRuntimeConfigReadsRBACTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "viewer-token")
+	if err := os.WriteFile(tokenPath, []byte("view-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+security:
+  rbac:
+    enabled: true
+    tokens:
+      - name: viewer
+        role: viewer
+        tokenFile: `+tokenPath+`
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := LoadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.Security.RBAC.Tokens[0].Token; got != "view-secret" {
+		t.Fatalf("unexpected RBAC token: %q", got)
+	}
+}
+
 func TestValidateRuntimeConfigRejectsPartialTLSConfig(t *testing.T) {
 	config := DefaultRuntimeConfig()
 	config.Security.TLSCertFile = "/etc/aifar-runtime/tls.crt"
@@ -108,5 +136,16 @@ func TestValidateRuntimeConfigRejectsPartialTLSConfig(t *testing.T) {
 	err := ValidateRuntimeConfig(config)
 	if err == nil || !strings.Contains(err.Error(), "tlsCertFile") {
 		t.Fatalf("expected partial TLS validation error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigReservesEtcdBackend(t *testing.T) {
+	config := DefaultRuntimeConfig()
+	config.State.Backend = "etcd"
+	config.State.Etcd.Endpoints = []string{"127.0.0.1:2379"}
+
+	err := ValidateRuntimeConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected reserved etcd backend error, got %v", err)
 	}
 }

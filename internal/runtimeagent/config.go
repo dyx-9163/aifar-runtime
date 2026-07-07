@@ -50,7 +50,15 @@ type APIConfig struct {
 }
 
 type StateConfig struct {
-	Dir string `json:"dir,omitempty" yaml:"dir,omitempty"`
+	Backend string     `json:"backend,omitempty" yaml:"backend,omitempty"`
+	Dir     string     `json:"dir,omitempty" yaml:"dir,omitempty"`
+	Etcd    EtcdConfig `json:"etcd,omitempty" yaml:"etcd,omitempty"`
+}
+
+type EtcdConfig struct {
+	Endpoints   []string `json:"endpoints,omitempty" yaml:"endpoints,omitempty"`
+	Prefix      string   `json:"prefix,omitempty" yaml:"prefix,omitempty"`
+	DialTimeout Duration `json:"dialTimeout,omitempty" yaml:"dialTimeout,omitempty"`
 }
 
 type DockerConfig struct {
@@ -81,10 +89,23 @@ type HealthConfig struct {
 }
 
 type SecurityConfig struct {
-	BearerToken     string `json:"bearerToken,omitempty" yaml:"bearerToken,omitempty"`
-	BearerTokenFile string `json:"bearerTokenFile,omitempty" yaml:"bearerTokenFile,omitempty"`
-	TLSCertFile     string `json:"tlsCertFile,omitempty" yaml:"tlsCertFile,omitempty"`
-	TLSKeyFile      string `json:"tlsKeyFile,omitempty" yaml:"tlsKeyFile,omitempty"`
+	BearerToken     string     `json:"bearerToken,omitempty" yaml:"bearerToken,omitempty"`
+	BearerTokenFile string     `json:"bearerTokenFile,omitempty" yaml:"bearerTokenFile,omitempty"`
+	TLSCertFile     string     `json:"tlsCertFile,omitempty" yaml:"tlsCertFile,omitempty"`
+	TLSKeyFile      string     `json:"tlsKeyFile,omitempty" yaml:"tlsKeyFile,omitempty"`
+	RBAC            RBACConfig `json:"rbac,omitempty" yaml:"rbac,omitempty"`
+}
+
+type RBACConfig struct {
+	Enabled bool                `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Tokens  []AccessTokenConfig `json:"tokens,omitempty" yaml:"tokens,omitempty"`
+}
+
+type AccessTokenConfig struct {
+	Name      string `json:"name,omitempty" yaml:"name,omitempty"`
+	Role      string `json:"role,omitempty" yaml:"role,omitempty"`
+	Token     string `json:"token,omitempty" yaml:"token,omitempty"`
+	TokenFile string `json:"tokenFile,omitempty" yaml:"tokenFile,omitempty"`
 }
 
 type ObservabilityConfig struct {
@@ -104,7 +125,12 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			ShutdownTimeout:   Duration{Duration: 30 * time.Second},
 		},
 		State: StateConfig{
-			Dir: DefaultStateDir,
+			Backend: "file",
+			Dir:     DefaultStateDir,
+			Etcd: EtcdConfig{
+				Prefix:      "/aifar-runtime",
+				DialTimeout: Duration{Duration: 5 * time.Second},
+			},
 		},
 		Docker: DockerConfig{
 			Command:       "docker",
@@ -169,7 +195,10 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.API.Listen = defaultString(config.API.Listen, defaults.API.Listen)
 	config.API.ReadHeaderTimeout = defaultDuration(config.API.ReadHeaderTimeout, defaults.API.ReadHeaderTimeout)
 	config.API.ShutdownTimeout = defaultDuration(config.API.ShutdownTimeout, defaults.API.ShutdownTimeout)
+	config.State.Backend = strings.ToLower(defaultString(config.State.Backend, defaults.State.Backend))
 	config.State.Dir = defaultString(config.State.Dir, defaults.State.Dir)
+	config.State.Etcd.Prefix = defaultString(config.State.Etcd.Prefix, defaults.State.Etcd.Prefix)
+	config.State.Etcd.DialTimeout = defaultDuration(config.State.Etcd.DialTimeout, defaults.State.Etcd.DialTimeout)
 	config.Docker.Command = defaultString(config.Docker.Command, defaults.Docker.Command)
 	config.Docker.RestartPolicy = defaultString(config.Docker.RestartPolicy, defaults.Docker.RestartPolicy)
 	config.Docker.AddHost = strings.TrimSpace(config.Docker.AddHost)
@@ -191,6 +220,13 @@ func NormalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.Security.BearerTokenFile = strings.TrimSpace(config.Security.BearerTokenFile)
 	config.Security.TLSCertFile = strings.TrimSpace(config.Security.TLSCertFile)
 	config.Security.TLSKeyFile = strings.TrimSpace(config.Security.TLSKeyFile)
+	for i := range config.Security.RBAC.Tokens {
+		token := &config.Security.RBAC.Tokens[i]
+		token.Name = strings.TrimSpace(token.Name)
+		token.Role = strings.ToLower(defaultString(token.Role, "admin"))
+		token.Token = strings.TrimSpace(token.Token)
+		token.TokenFile = strings.TrimSpace(token.TokenFile)
+	}
 	config.Log.Format = strings.ToLower(defaultString(config.Log.Format, defaults.Log.Format))
 	config.Log.Level = strings.ToLower(defaultString(config.Log.Level, defaults.Log.Level))
 	return config
@@ -202,6 +238,13 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	}
 	if strings.TrimSpace(config.State.Dir) == "" {
 		return errorsForField("state.dir", "must not be empty")
+	}
+	switch config.State.Backend {
+	case "file":
+	case "etcd":
+		return errorsForField("state.backend", "etcd is reserved for clustered control-plane storage but is not implemented in this single-node runtime yet")
+	default:
+		return errorsForField("state.backend", `must be "file" or reserved value "etcd"`)
 	}
 	if strings.TrimSpace(config.Docker.Command) == "" {
 		return errorsForField("docker.command", "must not be empty")
@@ -242,6 +285,28 @@ func ValidateRuntimeConfig(config RuntimeConfig) error {
 	if (config.Security.TLSCertFile == "") != (config.Security.TLSKeyFile == "") {
 		return errorsForField("security.tlsCertFile/security.tlsKeyFile", "must be configured together")
 	}
+	if config.Security.BearerToken != "" && config.Security.RBAC.Enabled {
+		return errorsForField("security.bearerToken", "must not be set when security.rbac.enabled is true")
+	}
+	if config.Security.BearerTokenFile != "" && config.Security.RBAC.Enabled {
+		return errorsForField("security.bearerTokenFile", "must not be set when security.rbac.enabled is true")
+	}
+	for _, token := range config.Security.RBAC.Tokens {
+		if token.Name == "" {
+			return errorsForField("security.rbac.tokens.name", "must not be empty")
+		}
+		switch token.Role {
+		case "admin", "operator", "viewer":
+		default:
+			return errorsForField("security.rbac.tokens.role", `must be "admin", "operator", or "viewer"`)
+		}
+		if token.Token == "" && token.TokenFile == "" {
+			return errorsForField("security.rbac.tokens.token", "token or tokenFile is required")
+		}
+		if token.Token != "" && token.TokenFile != "" {
+			return errorsForField("security.rbac.tokens.tokenFile", "must not be set with token")
+		}
+	}
 	switch config.Log.Format {
 	case "json", "text":
 	default:
@@ -263,13 +328,29 @@ func resolveRuntimeConfigSecrets(config *RuntimeConfig) error {
 		return errorsForField("security.bearerTokenFile", "must not be set with security.bearerToken")
 	}
 	if config.Security.BearerTokenFile == "" {
-		return nil
+		return resolveRuntimeConfigRBACTokens(config)
 	}
 	data, err := os.ReadFile(config.Security.BearerTokenFile)
 	if err != nil {
 		return fmt.Errorf("read runtime config security.bearerTokenFile: %w", err)
 	}
 	config.Security.BearerToken = strings.TrimSpace(string(data))
+	return resolveRuntimeConfigRBACTokens(config)
+}
+
+func resolveRuntimeConfigRBACTokens(config *RuntimeConfig) error {
+	for i := range config.Security.RBAC.Tokens {
+		token := &config.Security.RBAC.Tokens[i]
+		if token.TokenFile == "" {
+			continue
+		}
+		data, err := os.ReadFile(token.TokenFile)
+		if err != nil {
+			return fmt.Errorf("read runtime config security.rbac.tokens[%d].tokenFile: %w", i, err)
+		}
+		token.Token = strings.TrimSpace(string(data))
+		token.TokenFile = ""
+	}
 	return nil
 }
 
