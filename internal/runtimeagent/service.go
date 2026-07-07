@@ -37,7 +37,7 @@ func (m *Manager) snapshotRuntimes() []Runtime {
 	defer m.mu.RUnlock()
 	runtimes := make([]Runtime, 0, len(m.specs))
 	for _, key := range sortedRuntimeKeys(m.specs) {
-		runtimes = append(runtimes, m.specs[key])
+		runtimes = append(runtimes, cloneRuntime(m.specs[key]))
 	}
 	return runtimes
 }

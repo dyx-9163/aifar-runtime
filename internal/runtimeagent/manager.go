@@ -120,6 +120,7 @@ func (m *Manager) Apply(ctx context.Context, runtime Runtime) error {
 	defer m.reconcileMu.Unlock()
 	runtime = NormalizeRuntime(runtime)
 	key := KeyForRuntime(runtime)
+	previousRuntime, previousStatus, hasPrevious := m.previousRuntimeState(key)
 	if runtime.Metadata.Generation == 0 {
 		runtime.Metadata.Generation = m.nextGeneration(key)
 	}
@@ -145,6 +146,9 @@ func (m *Manager) Apply(ctx context.Context, runtime Runtime) error {
 	}
 	m.updateRuntimeStatus(runtime, RuntimePhaseStarting, nil, nil)
 	if err := m.reconcileDeployments(ctx, runtime); err != nil {
+		if hasPrevious {
+			return m.rollbackRuntime(ctx, runtime, previousRuntime, previousStatus, err)
+		}
 		m.recordFailedStatus(runtime, err)
 		return err
 	}
@@ -258,8 +262,8 @@ func (m *Manager) Status() map[string]any {
 			"apiVersion": runtime.APIVersion,
 			"kind":       runtime.Kind,
 			"metadata":   runtime.Metadata,
-			"spec":       runtime.Spec,
-			"status":     status,
+			"spec":       cloneRuntime(runtime).Spec,
+			"status":     cloneRuntimeStatus(status),
 		})
 	}
 	return map[string]any{
@@ -285,6 +289,7 @@ func (m *Manager) Status() map[string]any {
 			"scheduler-lite",
 			"global-port-admission",
 			"resource-capacity-admission",
+			"rolling-update-rollback",
 			"legacy-spec-read",
 		},
 	}
@@ -297,14 +302,14 @@ func (m *Manager) GetRuntime(namespace, name string) (Runtime, RuntimeStatus, bo
 	status := m.statuses[key.String()]
 	m.mu.RUnlock()
 	if ok {
-		return runtime, status, true
+		return cloneRuntime(runtime), cloneRuntimeStatus(status), true
 	}
 	runtime, err := m.store.ReadRuntime(key.Namespace, key.Name)
 	if err != nil {
 		return Runtime{}, RuntimeStatus{}, false
 	}
 	status, _ = m.store.ReadStatus(key.Namespace, key.Name)
-	return runtime, status, true
+	return cloneRuntime(runtime), cloneRuntimeStatus(status), true
 }
 
 func (m *Manager) Events(namespace, name string, tail int) ([]RuntimeEvent, error) {
@@ -374,8 +379,8 @@ func (m *Manager) updateRuntimeStatus(runtime Runtime, phase string, endpoints m
 	key := KeyForRuntime(runtime)
 	status := NewStatusWithOptions(runtime, phase, endpoints, err, m.statusOptions(runtime))
 	m.mu.Lock()
-	m.specs[key.String()] = runtime
-	m.statuses[key.String()] = status
+	m.specs[key.String()] = cloneRuntime(runtime)
+	m.statuses[key.String()] = cloneRuntimeStatus(status)
 	m.mu.Unlock()
 	if saveErr := m.store.SaveStatus(runtime, status); saveErr != nil {
 		logf(m.log, "AIFAR runtime status write failed namespace=%s name=%s phase=%s: %v\n", key.Namespace, key.Name, status.Phase, saveErr)
@@ -387,8 +392,8 @@ func (m *Manager) recordFailedStatus(runtime Runtime, err error) {
 	key := KeyForRuntime(runtime)
 	status := NewStatusWithOptions(runtime, RuntimePhaseFailed, nil, err, m.statusOptions(runtime))
 	m.mu.Lock()
-	m.specs[key.String()] = runtime
-	m.statuses[key.String()] = status
+	m.specs[key.String()] = cloneRuntime(runtime)
+	m.statuses[key.String()] = cloneRuntimeStatus(status)
 	m.mu.Unlock()
 	_ = m.store.SaveRuntime(runtime)
 	_ = m.store.SaveStatus(runtime, status)

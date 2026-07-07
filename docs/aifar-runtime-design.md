@@ -233,9 +233,10 @@ Core conditions:
 3. Scheduler Lite must admit a Runtime before provider actions. It checks node assignment, global listener conflicts, ingress `listenPort + host + path` conflicts, and node resource capacity.
 4. `Service.listenPort` 和 `Ingress.listenPort` 是外部契约，不应漂移。
    `Service.listenPort` and `Ingress.listenPort` are external contracts and must not drift.
-5. `replicas: 0` 表示下线 deployment。
+5. Failed rolling updates must keep the previous Runtime spec/status online, remove failed new-generation containers, and record rollback events.
+6. `replicas: 0` 表示下线 deployment。
    `replicas: 0` means taking a deployment offline.
-6. 删除只删除 Runtime state、listeners、owned containers，不删除数据目录、镜像、外部服务或注册中心记录。
+7. 删除只删除 Runtime state、listeners、owned containers，不删除数据目录、镜像、外部服务或注册中心记录。
    Deletion removes only Runtime state, listeners, and owned containers; it does not delete data directories, images, external services, or registry records.
 
 ## State Store / 状态存储

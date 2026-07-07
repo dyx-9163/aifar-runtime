@@ -85,7 +85,7 @@ func (m *Manager) runtimesForScheduling(exclude RuntimeKey) []Runtime {
 		if exclude.Name != "" && KeyForRuntime(runtime) == exclude {
 			continue
 		}
-		runtimes = append(runtimes, runtime)
+		runtimes = append(runtimes, cloneRuntime(runtime))
 	}
 	return runtimes
 }

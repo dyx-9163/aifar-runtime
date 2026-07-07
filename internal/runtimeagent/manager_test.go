@@ -72,6 +72,34 @@ func TestManagerApplyRecordsFailedSubresourceStatus(t *testing.T) {
 	}
 }
 
+func TestManagerGetRuntimeReturnsIsolatedCopies(t *testing.T) {
+	servicePort := freePort(t)
+	ingressPort := freePort(t)
+	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: newFakeDockerRunner()})
+	runtime := testRuntime(ingressPort, servicePort)
+	if err := manager.Apply(context.Background(), runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, found := manager.GetRuntime("prod", "demo")
+	if !found {
+		t.Fatal("runtime not found")
+	}
+	got.Spec.Deployments[0].Revision = "mutated"
+	got.Spec.Deployments[0].Selector["app"] = "mutated"
+
+	again, _, found := manager.GetRuntime("prod", "demo")
+	if !found {
+		t.Fatal("runtime not found on second read")
+	}
+	if again.Spec.Deployments[0].Revision == "mutated" || again.Spec.Deployments[0].Selector["app"] == "mutated" {
+		t.Fatalf("manager returned shared runtime internals: %#v", again.Spec.Deployments[0])
+	}
+	if err := manager.Remove(context.Background(), "prod", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerShutdownStopsProxyListeners(t *testing.T) {
 	port := freePort(t)
 	manager := NewManager(ManagerOptions{StateDir: t.TempDir(), Runner: newFakeDockerRunner()})
@@ -132,6 +160,7 @@ type fakeDockerRunner struct {
 	mu         sync.Mutex
 	calls      []string
 	containers map[string]fakeContainer
+	failReady  map[string]bool
 }
 
 type fakeContainer struct {
@@ -144,7 +173,7 @@ type fakeContainer struct {
 }
 
 func newFakeDockerRunner() *fakeDockerRunner {
-	return &fakeDockerRunner{containers: map[string]fakeContainer{}}
+	return &fakeDockerRunner{containers: map[string]fakeContainer{}, failReady: map[string]bool{}}
 }
 
 func (r *fakeDockerRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
@@ -245,12 +274,23 @@ func (r *fakeDockerRunner) run(args []string) CommandResult {
 		}
 	}
 	if name != "" {
+		running := true
+		status := "running"
+		health := "healthy"
+		exitCode := 0
+		if r.failReady[name] {
+			running = false
+			status = "exited"
+			health = ""
+			exitCode = 1
+		}
 		r.containers[name] = fakeContainer{
-			labels:  labels,
-			ip:      "172.20.0." + strconv.Itoa(10+len(r.containers)),
-			running: true,
-			status:  "running",
-			health:  "healthy",
+			labels:   labels,
+			ip:       "172.20.0." + strconv.Itoa(10+len(r.containers)),
+			running:  running,
+			status:   status,
+			health:   health,
+			exitCode: exitCode,
 		}
 	}
 	return CommandResult{Stdout: name + "\n"}
@@ -327,6 +367,12 @@ func (r *fakeDockerRunner) setContainerState(name string, running bool, status s
 	container.exitCode = exitCode
 	container.health = health
 	r.containers[name] = container
+}
+
+func (r *fakeDockerRunner) failReadinessForName(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failReady[name] = true
 }
 
 func (r *fakeDockerRunner) hasContainer(name string) bool {

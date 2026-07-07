@@ -8,7 +8,7 @@ func (m *Manager) replaceRoutesAndState(runtime Runtime, refreshed map[string][]
 	key := KeyForRuntime(runtime)
 	portsToStart := []int{}
 	m.mu.Lock()
-	m.specs[key.String()] = runtime
+	m.specs[key.String()] = cloneRuntime(runtime)
 	for endpointKey := range m.endpoints {
 		if strings.HasPrefix(endpointKey, key.String()+"/") {
 			delete(m.endpoints, endpointKey)

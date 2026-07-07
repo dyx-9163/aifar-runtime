@@ -82,6 +82,7 @@ sudo systemctl restart aifar-runtime
 | Runtime is rejected by node checks | Confirm `spec.nodeName` matches `node.name`, and `spec.nodeSelector` matches `node.labels` in `/etc/aifar-runtime/config.yaml`. |
 | Runtime is rejected by port admission | Check whether another Runtime already owns the Service `listenPort`, or whether an Ingress route has the same `listenPort`, overlapping host, and same path. |
 | Runtime is rejected by capacity admission | Check `/status.scheduler`, then adjust `node.allocatable`, reduce replicas, or lower deployment `resources`. |
+| Rolling update is rolled back | Inspect events for `RollbackStarted`, `RollbackComplete`, or `RollbackFailed`, then check the failed generation container diagnostics in the event message and runtime logs. |
 | A container keeps restarting | Inspect the deployment health check, container exit code, recent logs, and `selfHeal.maxRestarts` / `selfHeal.backoff`. |
 | State looks stale | Confirm `state.dir` ownership and restart the service to trigger load plus resync. |
 | Private image pull fails | Confirm the referenced `imagePullSecrets` secret and registry credentials, then inspect Docker auth errors in the event stream/logs. |

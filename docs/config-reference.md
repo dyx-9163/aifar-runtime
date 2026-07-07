@@ -134,6 +134,8 @@ Runtime status phases are:
 
 Core conditions include `SpecAccepted`, `NodeAssigned`, `ImagePulled`, `ContainerReady`, `ServicesReady`, and `IngressReady`. Deployment status includes `restarts`, which is incremented by runtime self-heal attempts.
 
+When a rolling update fails while a previous Runtime exists, AIFAR Runtime restores the previous Runtime spec/status, removes containers from the failed new generation, and keeps existing ready containers online. The event stream records `RollbackStarted`, then `RollbackComplete` or `RollbackFailed`.
+
 ## Backup And Restore
 
 ```bash
