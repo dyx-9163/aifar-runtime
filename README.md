@@ -38,6 +38,23 @@ aifar-runtime events --namespace prod --name demo --tail 100
 aifar-runtime delete --namespace prod --name demo
 ```
 
+## systemd / Linux 服务
+
+示例 unit 和环境文件位于 `deploy/systemd/`。
+
+```bash
+go build -o aifar-runtime ./cmd/aifar-runtime
+sudo install -m 0755 aifar-runtime /usr/local/bin/aifar-runtime
+sudo install -d -m 0755 /etc/aifar-runtime /var/lib/aifar-runtime
+sudo install -m 0644 deploy/systemd/aifar-runtime.env /etc/aifar-runtime/aifar-runtime.env
+sudo install -m 0644 deploy/systemd/aifar-runtime.service /etc/systemd/system/aifar-runtime.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now aifar-runtime
+sudo systemctl status aifar-runtime
+```
+
+默认服务依赖本机 Docker，并以 systemd 默认用户运行。若改为非 root 用户运行，需要确保该用户可以访问 Docker socket，并可读写 `AIFAR_RUNTIME_STATE_DIR`。
+
 ## Minimal Runtime YAML / 最小 YAML
 
 ```yaml

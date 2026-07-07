@@ -1,0 +1,19 @@
+[Unit]
+Description=AIFAR Runtime
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+Environment=AIFAR_RUNTIME_LISTEN=127.0.0.1:18081
+Environment=AIFAR_RUNTIME_STATE_DIR=/var/lib/aifar-runtime
+EnvironmentFile=-/etc/aifar-runtime/aifar-runtime.env
+ExecStart=/usr/local/bin/aifar-runtime serve --listen ${AIFAR_RUNTIME_LISTEN} --state-dir ${AIFAR_RUNTIME_STATE_DIR}
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

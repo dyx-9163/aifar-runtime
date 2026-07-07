@@ -133,7 +133,7 @@ func (s *StateStore) ReadStatus(namespace, name string) (RuntimeStatus, error) {
 	return status, nil
 }
 
-func (s *StateStore) AppendEvent(namespace, name, eventType, reason, message string) {
+func (s *StateStore) AppendEvent(namespace, name, eventType, reason, message string) error {
 	key := runtimeKey(namespace, name)
 	event := RuntimeEvent{
 		Time:      time.Now().UTC().Format(time.RFC3339Nano),
@@ -143,19 +143,26 @@ func (s *StateStore) AppendEvent(namespace, name, eventType, reason, message str
 		Namespace: key.Namespace,
 		Name:      key.Name,
 	}
-	_ = s.Ensure()
+	if err := s.Ensure(); err != nil {
+		return err
+	}
 	path := s.eventsPath(key.Namespace, key.Name)
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return
+		return err
 	}
 	defer file.Close()
 	data, err := json.Marshal(event)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = file.Write(append(data, '\n'))
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *StateStore) ReadEvents(namespace, name string, tail int) ([]RuntimeEvent, error) {
