@@ -12,8 +12,8 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | `api.shutdownTimeout` | `30s` | Maximum graceful shutdown time for the API and proxy listeners. |
 | `node.name` | `local` | Local node identity. Runtime `spec.nodeName` must match this value when set. |
 | `node.labels` | empty | Local node labels used by Runtime `spec.nodeSelector`. |
-| `node.capacity` | empty | Reserved local node capacity declaration for future scheduling. |
-| `node.allocatable` | `node.capacity` | Reserved local node allocatable resources. Defaults to `capacity` when empty. |
+| `node.capacity` | empty | Local node capacity used by Scheduler Lite admission. Empty resource fields are not enforced. |
+| `node.allocatable` | `node.capacity` | Local allocatable resources used by Scheduler Lite. Defaults to `capacity` when empty. |
 | `state.backend` | `file` | State backend. `etcd` is reserved for the future clustered control plane and is rejected until implemented. |
 | `state.dir` | `/var/lib/aifar-runtime` | Persistent specs, statuses, events, and proxy route state. |
 | `state.etcd.endpoints` | empty | Reserved etcd endpoints for future clustered storage. |
@@ -52,7 +52,7 @@ CLI flags such as `--listen` and `--state-dir` are only operational overrides; n
 | --- | --- |
 | `/healthz` | Liveness probe. Does not require Docker readiness or bearer auth. |
 | `/readyz` | Readiness probe. Does not require bearer auth. |
-| `/status` | Runtime API status, local node information, loaded Runtime resources, listeners, and build information. |
+| `/status` | Runtime API status, local node information, Scheduler Lite resource snapshot, loaded Runtime resources, listeners, and build information. |
 | `/version` | Binary and Runtime contract version information. |
 | `/metrics` | Prometheus-compatible runtime metrics when enabled. |
 | `/apis/aifar.io/v1/namespaces/{namespace}/runtimes/{name}` | Rendered Runtime resource API. |
@@ -110,6 +110,14 @@ spec:
 `secret.data` values are base64 encoded, while `secret.stringData` values are plain strings and override `data` keys. `registry-auth` uses `docker login --password-stdin` followed by `docker pull`. `dockerconfigjson` secrets can provide `stringData.configPath` to use an existing Docker config directory.
 
 `spec.nodeName` is optional. When set, it must equal `node.name` on the local runtime process. `spec.nodeSelector` keys must match `node.labels`. These fields are single-node checks today and reserve the contract needed for a future etcd-backed scheduler.
+
+Scheduler Lite runs before Docker/network/proxy actions. It rejects:
+
+- A `Service.listenPort` already claimed by another Runtime service or ingress listener.
+- An ingress route whose `listenPort + host + path` overlaps an existing Runtime ingress route. Host `*` overlaps any host.
+- A Runtime whose requested `resources.cpus`, `resources.memory`, or `resources.pidsLimit` would exceed `node.allocatable` or `node.capacity`.
+
+Resource requests are multiplied by deployment replicas. CPU is exposed in millicores under `/status.scheduler`, memory is exposed as bytes, and empty node capacity fields mean "do not enforce this resource".
 
 Runtime status phases are:
 

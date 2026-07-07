@@ -32,6 +32,7 @@ type ManagerOptions struct {
 	Config       RuntimeConfig
 	Store        RuntimeStateStore
 	Runner       CommandRunner
+	Scheduler    RuntimeScheduler
 	Log          io.Writer
 	DockerEvents DockerEventWatcher
 }
@@ -46,6 +47,7 @@ type Manager struct {
 	log          io.Writer
 	config       RuntimeConfig
 	dockerEvents DockerEventWatcher
+	scheduler    RuntimeScheduler
 	specs        map[string]Runtime
 	statuses     map[string]RuntimeStatus
 	routes       map[int][]proxyRoute
@@ -74,7 +76,7 @@ func NewManager(options ManagerOptions) *Manager {
 			return defaultDockerEventWatcher(ctx, config.Docker.Command)
 		}
 	}
-	return &Manager{
+	manager := &Manager{
 		store:        store,
 		runner:       runner,
 		log:          options.Log,
@@ -88,6 +90,12 @@ func NewManager(options ManagerOptions) *Manager {
 		endpoints:    map[string][]Endpoint{},
 		restarts:     map[string]restartRecord{},
 	}
+	if options.Scheduler != nil {
+		manager.scheduler = options.Scheduler
+	} else {
+		manager.scheduler = NewSingleNodeScheduler(manager)
+	}
+	return manager
 }
 
 func (m *Manager) StateDir() string {
@@ -119,10 +127,12 @@ func (m *Manager) Apply(ctx context.Context, runtime Runtime) error {
 		m.appendEvent(key.Namespace, key.Name, "Warning", "Rejected", err.Error())
 		return err
 	}
-	if err := m.validateRuntimeNode(runtime); err != nil {
+	admitted, err := m.scheduler.AdmitRuntime(runtime)
+	if err != nil {
 		m.appendEvent(key.Namespace, key.Name, "Warning", "Rejected", err.Error())
 		return err
 	}
+	runtime = admitted
 	m.appendEvent(key.Namespace, key.Name, "Normal", "ApplyStarted", "Runtime reconciliation started")
 	phase := RuntimePhasePending
 	if m.runtimeExists(key) {
@@ -231,6 +241,8 @@ func (m *Manager) Remove(ctx context.Context, namespace, name string) error {
 }
 
 func (m *Manager) Status() map[string]any {
+	node := m.nodeStatus()
+	scheduler := m.ResourceSnapshot()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	listeners := make([]int, 0, len(m.servers))
@@ -254,7 +266,8 @@ func (m *Manager) Status() map[string]any {
 		"status":    "running",
 		"version":   RuntimeVersion,
 		"stateDir":  m.store.Root(),
-		"node":      m.nodeStatus(),
+		"node":      node,
+		"scheduler": scheduler,
 		"listeners": listeners,
 		"runtimes":  instances,
 		"features": []string{
@@ -269,6 +282,9 @@ func (m *Manager) Status() map[string]any {
 			"runtime-status-machine",
 			"self-healing",
 			"single-node-model",
+			"scheduler-lite",
+			"global-port-admission",
+			"resource-capacity-admission",
 			"legacy-spec-read",
 		},
 	}

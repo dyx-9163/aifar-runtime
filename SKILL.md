@@ -31,6 +31,7 @@ description: Work on the AIFAR Runtime Go repository. Use when changing, reviewi
 - Keep Runtime phases and conditions useful for operators. Prefer explicit `Pending`, `Pulling`, `Starting`, `Running`, `Degraded`, `Updating`, `Failed`, and `Terminating` states over vague success/failure strings.
 - Keep self-healing bounded and observable. Automatic restarts must honor configured limits/backoff and write status/events.
 - Keep the single-node `node` model compatible with future etcd scheduling: validate `nodeName` and `nodeSelector`, but do not introduce distributed behavior without an explicit state backend implementation.
+- Keep Scheduler Lite as the admission boundary before provider actions. Global port conflicts and node resource capacity failures should reject the Runtime without starting Docker work or persisting the rejected spec.
 
 ## GitHub Publishing
 

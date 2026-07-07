@@ -12,6 +12,7 @@ AIFAR Runtime is a single-node Kubernetes-like runtime controller. It accepts im
 - Status model: `Pending`, `Pulling`, `Starting`, `Running`, `Degraded`, `Updating`, `Failed`, `Terminating`.
 - Self-heal: exited or unhealthy managed containers can be replaced automatically during reconciliation.
 - Node model: single-node identity and selectors are available now, with a contract reserved for future clustered scheduling.
+- Scheduler Lite: Runtime apply is admitted before Docker actions, including global host-port conflict checks and node resource capacity checks.
 - Service discovery: application-owned. Runtime does not register into Nacos, Eureka, Consul, or other registries.
 - Delete behavior: removes Runtime state, listeners, and owned containers only. It does not remove images, data directories, external services, or registry records.
 

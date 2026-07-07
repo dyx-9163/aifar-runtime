@@ -230,11 +230,12 @@ Core conditions:
    Normalize and validate before provider actions.
 2. 同一 spec 重复 apply 必须幂等。
    Reapplying the same spec must be idempotent.
-3. `Service.listenPort` 和 `Ingress.listenPort` 是外部契约，不应漂移。
+3. Scheduler Lite must admit a Runtime before provider actions. It checks node assignment, global listener conflicts, ingress `listenPort + host + path` conflicts, and node resource capacity.
+4. `Service.listenPort` 和 `Ingress.listenPort` 是外部契约，不应漂移。
    `Service.listenPort` and `Ingress.listenPort` are external contracts and must not drift.
-4. `replicas: 0` 表示下线 deployment。
+5. `replicas: 0` 表示下线 deployment。
    `replicas: 0` means taking a deployment offline.
-5. 删除只删除 Runtime state、listeners、owned containers，不删除数据目录、镜像、外部服务或注册中心记录。
+6. 删除只删除 Runtime state、listeners、owned containers，不删除数据目录、镜像、外部服务或注册中心记录。
    Deletion removes only Runtime state, listeners, and owned containers; it does not delete data directories, images, external services, or registry records.
 
 ## State Store / 状态存储

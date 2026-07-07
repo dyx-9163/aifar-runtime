@@ -38,7 +38,7 @@ aifar-runtime status --addr 127.0.0.1:18081 --token "$(sudo cat /etc/aifar-runti
 curl -fsS -H "Authorization: Bearer $(sudo cat /etc/aifar-runtime/secrets/api-token)" http://127.0.0.1:18081/metrics
 ```
 
-Review `/status` for `node.name`, active listeners, Runtime phases, and restart counts. A healthy steady state should show Runtime phase `Running` and deployment `ready == replicas`.
+Review `/status` for `node.name`, `scheduler.requested`, `scheduler.available`, active listeners, Runtime phases, and restart counts. A healthy steady state should show Runtime phase `Running` and deployment `ready == replicas`.
 
 ## Backup And Restore
 
@@ -80,6 +80,8 @@ sudo systemctl restart aifar-runtime
 | Runtime status is `Failed` | Inspect `aifar-runtime events --namespace <ns> --name <name>` and container logs. |
 | Runtime status is `Degraded` | Check deployment `ready`, `restarts`, and events for `ContainerRestarting` or `RestartLimitExceeded`. |
 | Runtime is rejected by node checks | Confirm `spec.nodeName` matches `node.name`, and `spec.nodeSelector` matches `node.labels` in `/etc/aifar-runtime/config.yaml`. |
+| Runtime is rejected by port admission | Check whether another Runtime already owns the Service `listenPort`, or whether an Ingress route has the same `listenPort`, overlapping host, and same path. |
+| Runtime is rejected by capacity admission | Check `/status.scheduler`, then adjust `node.allocatable`, reduce replicas, or lower deployment `resources`. |
 | A container keeps restarting | Inspect the deployment health check, container exit code, recent logs, and `selfHeal.maxRestarts` / `selfHeal.backoff`. |
 | State looks stale | Confirm `state.dir` ownership and restart the service to trigger load plus resync. |
 | Private image pull fails | Confirm the referenced `imagePullSecrets` secret and registry credentials, then inspect Docker auth errors in the event stream/logs. |
